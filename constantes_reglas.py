@@ -9,9 +9,19 @@ CUADRANTES = (
     "Cuadrante 6",
 )
 
-ROLES_PERSONAL = ("GUARDIA", "RADIO_OPERADOR")
+# Para sumar cargos nuevos basta agregarlos aquí; el planificador de equipo
+# calcula la cobertura por cada rol registrado.
+ROLES_PERSONAL = ("PATRULLERO", "RADIO_OPERADOR", "SUPERVISOR")
+
+# Solo los patrulleros tienen modalidad (Móvil, Moto, Infantería, Bicicleta)
+ROL_PATRULLERO = "PATRULLERO"
+
+# Modalidad de patrullaje / servicio
+MODALIDADES = ("Móvil", "Moto", "Infantería", "Bicicleta")
 
 GRUPOS_TURNO = ("A", "B")
+
+JORNADAS = ("DIURNO", "NOCTURNO")
 
 HORARIOS_DIURNOS = (
     "07:00 a 18:00",
@@ -23,6 +33,9 @@ HORARIO_NOCTURNO = "20:00 a 07:00"
 
 ESTADOS_CELDA = ("T", "L", "VAC", "HE", "HEN")
 
+# Estados en los que la persona NO trabaja (cuentan como día libre para el Art. 38)
+ESTADOS_LIBRES = ("L", "VAC")
+
 DIAS_SEMANA = (
     "Lunes",
     "Martes",
@@ -32,6 +45,8 @@ DIAS_SEMANA = (
     "Sábado",
     "Domingo",
 )
+
+SEMANAS_MES = 4
 
 # Restricción legal (Art. 38 Código del Trabajo - Jornadas Excepcionales 4x3)
 MIN_DOMINGOS_LIBRES_DIURNO = 2
