@@ -20,9 +20,10 @@ _ESTILOS = [
     (False, "1F7A44", "DDF3E6", True),  # 10 cobertura completa
     (True, "B3261E", "FBE3E1", True),   # 11 cobertura incompleta / alerta
     (True, "000000", "F6F6FA", False),  # 12 subtítulo gris
+    (True, "FFFFFF", "1F8A8A", True),   # 13 licencia médica
 ]
 EST = {"normal": 0, "enc": 1, "sem": 2, "dia": 3, "noche": 4, "libre": 5, "vac": 6, "he": 7,
-       "centro": 8, "titulo": 9, "ok": 10, "alerta": 11, "sub": 12}
+       "centro": 8, "titulo": 9, "ok": 10, "alerta": 11, "sub": 12, "lm": 13}
 
 
 def _col(n: int) -> str:

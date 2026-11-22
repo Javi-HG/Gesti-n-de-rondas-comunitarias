@@ -102,3 +102,18 @@ def elegir_horarios(personas: list[dict], horarios: list[str], vueltas: int = 3)
         if not cambio:
             break
     return elegidos
+
+
+def cobertura_fechas(turnos, dias) -> list[set[int]]:
+    """Horas cubiertas en cada fecha de `dias`. turnos: iterable de (fecha, horario).
+
+    Un turno nocturno que parte la víspera cubre las primeras horas del día siguiente."""
+    from datetime import timedelta
+
+    por_fecha = {d: set() for d in dias}
+    for fecha, horario in turnos:
+        for desp, hora in horas_turno(horario):
+            d = fecha + timedelta(days=desp)
+            if d in por_fecha:
+                por_fecha[d].add(hora)
+    return [por_fecha[d] for d in dias]

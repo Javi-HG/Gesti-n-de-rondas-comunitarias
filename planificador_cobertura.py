@@ -71,6 +71,24 @@ def _corridas(seq):
     return [(b, n) for b, n in res]
 
 
+def _es_ciclico(seq) -> bool:
+    """True si el patrón empalma consigo mismo (final con inicio): trabajo 3-6 y descanso de 3.
+
+    Solo estos patrones se pueden extender a cualquier mes del calendario sin romper el ciclo.
+    """
+    largo = len(seq)
+    if all(x == seq[0] for x in seq):
+        return False
+    inicio = next(k for k in range(largo) if seq[k] != seq[k - 1])
+    rotado = seq[inicio:] + seq[:inicio]
+    for bit, n in _corridas(rotado):
+        if bit == 0 and not (TRABAJO_MIN <= n <= TRABAJO_MAX):
+            return False
+        if bit == 1 and n != LIBRES_POR_BLOQUE:
+            return False
+    return True
+
+
 @lru_cache(maxsize=1)
 def _catalogo():
     """Todos los patrones de 28 días (1 = libre) que respetan el ciclo 4x3.
@@ -112,6 +130,8 @@ def _catalogo():
         domingos = sum(seq[7 * w + 6] for w in range(SEMANAS_MES))
         fines = sum(seq[7 * w + 5] and seq[7 * w + 6] for w in range(SEMANAS_MES))
         findes[seq] = fines
+        if not _es_ciclico(seq):
+            continue  # un patrón que no empalma consigo mismo no sirve para encadenar meses
         if domingos >= MIN_DOMINGOS_LIBRES_DIURNO:
             diurnos.append(seq)
         if fines >= MIN_FINDES_LIBRES_NOCTURNO:

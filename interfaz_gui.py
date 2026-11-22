@@ -5,9 +5,12 @@ asistente individual y planificador de equipo con cobertura 24/7.
 """
 
 import sqlite3
+from datetime import date
 import tkinter as tk
+import threading
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+import calendario as cal
 from capa_datos import RepositorioTurnos
 from capa_ley_opciones import ServicioTurnos
 from constantes_reglas import (
@@ -15,6 +18,9 @@ from constantes_reglas import (
     DESTINOS_SERVICIO,
     FERIA,
     ESTADOS_CELDA,
+    ESTADOS_DIA_EDITABLES,
+    MIN_PERSONAS_POR_DIA,
+    MIN_POR_TURNO_MODALIDAD,
     GRUPOS_TURNO,
     HORARIO_NOCTURNO,
     HORARIOS_DIURNOS,
@@ -22,11 +28,14 @@ from constantes_reglas import (
     MODALIDADES,
     ROL_PATRULLERO,
     ROLES_PERSONAL,
+    ROL_JEFE_TURNO,
+    etiqueta_rol,
 )
 from mapa_cisterna import dibujar_mapa
 from planificador_cobertura import DIURNO, NOCTURNO, minimo_personas
 
 SIN_CUADRANTE = "Sin cuadrante"
+SIN_MOVIL = "Sin móvil"
 
 # ---------- Paleta ----------
 MORADO = "#5B2A86"
@@ -50,6 +59,7 @@ COLORES_ESTADO = {
     "VAC": ("#8E5BC0", BLANCO),
     "HE": ("#F2B84B", "#3A2A00"),
     "HEN": ("#D98A1F", BLANCO),
+    "LM": ("#1F8A8A", BLANCO),
 }
 COLOR_ESTADO_DEFECTO = (BLANCO, TEXTO)
 
@@ -61,6 +71,7 @@ NOMBRES_ESTADO = {
     "VAC": "Vacaciones",
     "HE": "Horas extras",
     "HEN": "H. extras nocturnas",
+    "LM": "Licencia médica",
 }
 
 
@@ -178,11 +189,14 @@ class AplicacionTurnosGUI:
         self.celdas = {}              # (semana, dia) -> Label
         self.malla_actual = {}        # (semana, dia) -> (id_asignacion, estado, jornada)
         self.celda_sel = None         # (semana, dia)
+        self.fecha_celda = {}         # (semana, dia) -> fecha real de esa casilla
+        self.clave_de_fecha = {}      # fecha -> (semana, dia)
         self.opciones_actuales = []
         self._arr = None              # arrastre en curso
 
         self._configurar_estilos()
         self._construir_interfaz()
+        self._sincronizar_periodo()
         self._cargar_lista_personal()
 
     # ------------------------------------------------------------------ estilos
@@ -326,6 +340,27 @@ class AplicacionTurnosGUI:
             header, text="Jefatura Operativa · Seguridad La Cisterna", bg=MORADO,
             fg="#D6C4EA", font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, pady=(16, 8))
+        # Navegador de mes: todo lo que se ve y se planifica corresponde al mes elegido
+        nav = tk.Frame(header, bg=MORADO)
+        nav.pack(side=tk.LEFT, padx=(24, 0), pady=10)
+        BotonRedondo(
+            nav, "◀", lambda: self._cambiar_mes(-1), bg=MORADO_OSC, hover=VERDE, width=40, height=34,
+            fondo=MORADO, fuente=("Segoe UI", 11, "bold"), radio=12,
+        ).pack(side=tk.LEFT)
+        self.combo_mes = ttk.Combobox(nav, values=cal.NOMBRES_MES, state="readonly", width=11)
+        self.combo_mes.pack(side=tk.LEFT, padx=(8, 4))
+        self.combo_anio = ttk.Combobox(nav, values=list(range(2024, 2036)), state="readonly", width=6)
+        self.combo_anio.pack(side=tk.LEFT, padx=(0, 8))
+        self.combo_mes.bind("<<ComboboxSelected>>", lambda e: self._elegir_periodo())
+        self.combo_anio.bind("<<ComboboxSelected>>", lambda e: self._elegir_periodo())
+        BotonRedondo(
+            nav, "▶", lambda: self._cambiar_mes(+1), bg=MORADO_OSC, hover=VERDE, width=40, height=34,
+            fondo=MORADO, fuente=("Segoe UI", 11, "bold"), radio=12,
+        ).pack(side=tk.LEFT)
+        BotonRedondo(
+            nav, "Hoy", self._ir_a_hoy, bg=MORADO_OSC, hover=VERDE, width=56, height=34,
+            fondo=MORADO, fuente=("Segoe UI", 10, "bold"), radio=12,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         tk.Frame(self.root, bg=VERDE, height=4).pack(fill=tk.X)
 
         cuerpo = tk.Frame(self.root, bg=FONDO)
@@ -344,6 +379,43 @@ class AplicacionTurnosGUI:
         tarj_lista, c_lista = self._tarjeta(izq, "Personal", extra=self._controles_ancho)
         tarj_lista.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
 
+        # --- búsqueda y filtros ---
+        busq = tk.Frame(c_lista, bg=BLANCO)
+        busq.pack(fill=tk.X)
+        busq.columnconfigure(0, weight=1)
+        self.var_busqueda = tk.StringVar()
+        self.entry_busqueda = ttk.Entry(busq, textvariable=self.var_busqueda)
+        self.entry_busqueda.grid(row=0, column=0, sticky="ew")
+        self.var_busqueda.trace_add("write", lambda *a: self._cargar_lista_personal())
+        tk.Label(busq, text="🔍", bg=BLANCO, fg=GRIS, font=("Segoe UI", 11)).grid(row=0, column=1, padx=(4, 0))
+        self.filtros_lista = {}
+        filtros = (
+            ("cuadrante", ("Todos los cuadrantes", *DESTINOS_SERVICIO, SIN_CUADRANTE)),
+            ("turno", ("Ambos turnos", "Turno A", "Turno B")),
+            ("jornada", ("Diurno y nocturno", "Diurno", "Nocturno")),
+            ("tipo", ("Cualquier tipo", *ServicioTurnos.TIPOS_FILTRO)),
+        )
+        marco_f = tk.Frame(c_lista, bg=BLANCO)
+        marco_f.pack(fill=tk.X, pady=(6, 0))
+        marco_f.columnconfigure(0, weight=1)
+        marco_f.columnconfigure(1, weight=1)
+        for k, (clave, valores) in enumerate(filtros):
+            cb = ttk.Combobox(marco_f, values=valores, state="readonly", width=14)
+            cb.current(0)
+            cb.grid(row=k // 2, column=k % 2, sticky="ew", padx=(0, 3) if k % 2 == 0 else (3, 0), pady=(0, 4))
+            cb.bind("<<ComboboxSelected>>", lambda e: self._cargar_lista_personal())
+            self.filtros_lista[clave] = cb
+        fila_cnt = tk.Frame(c_lista, bg=BLANCO)
+        fila_cnt.pack(fill=tk.X, pady=(0, 4))
+        self.lbl_conteo = tk.Label(fila_cnt, text="", bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), anchor="w")
+        self.lbl_conteo.pack(side=tk.LEFT)
+        lim = tk.Label(
+            fila_cnt, text="Limpiar filtros", bg=BLANCO, fg=MORADO, cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        lim.pack(side=tk.RIGHT)
+        lim.bind("<Button-1>", lambda e: self._limpiar_filtros())
+
         caja = tk.Frame(c_lista, bg=BLANCO)
         caja.pack(fill=tk.BOTH, expand=True)
         scroll = ttk.Scrollbar(caja, orient=tk.VERTICAL)
@@ -357,13 +429,13 @@ class AplicacionTurnosGUI:
         self.lista_personal.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.lista_personal.bind("<<ListboxSelect>>", lambda e: self._on_seleccion_personal())
-        self.lista_personal.bind("<Double-Button-1>", lambda e: self._editar_nombre())
+        self.lista_personal.bind("<Double-Button-1>", lambda e: self._editar_persona())
         fila_acc = tk.Frame(c_lista, bg=BLANCO)
         fila_acc.pack(fill=tk.X, pady=(8, 0))
         fila_acc.columnconfigure(0, weight=1)
         fila_acc.columnconfigure(1, weight=1)
         self._btn(
-            fila_acc, text="Editar nombre", style="Morado.TButton", command=self._editar_nombre,
+            fila_acc, text="Editar datos", style="Morado.TButton", command=self._editar_persona,
         ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
         self._btn(
             fila_acc, text="Eliminar", style="Rojo.TButton", command=self._eliminar_personal,
@@ -380,7 +452,9 @@ class AplicacionTurnosGUI:
         self.entry_nombre = ttk.Entry(c_nuevo)
         self.entry_nombre.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         ttk.Label(c_nuevo, text="Cargo / Rol").grid(row=2, column=0, columnspan=2, sticky="w")
-        self.combo_rol = ttk.Combobox(c_nuevo, values=ROLES_PERSONAL, state="readonly")
+        self.combo_rol = ttk.Combobox(
+            c_nuevo, values=[etiqueta_rol(r) for r in ROLES_PERSONAL], state="readonly"
+        )
         self.combo_rol.current(0)
         self.combo_rol.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         ttk.Label(c_nuevo, text="Turno").grid(row=4, column=0, sticky="w")
@@ -435,8 +509,8 @@ class AplicacionTurnosGUI:
         tab_mod = tk.Frame(self.notebook, bg=FONDO, padx=10, pady=10)
         self.notebook.add(tab_ind, text="  Malla individual  ")
         self.notebook.add(tab_equipo, text="  Malla del equipo  ")
-        self.notebook.add(tab_mod, text="  Modalidad de patrulleros  ")
-        self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._refrescar_vistas())
+        self.notebook.add(tab_mod, text="  Modalidad y jefes de turno  ")
+        self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._pintar_pestana_visible())
         der = self._pestana_scroll(tab_ind)
         self._construir_tab_equipo(tab_equipo)
         self._construir_tab_modalidad(tab_mod)
@@ -472,11 +546,14 @@ class AplicacionTurnosGUI:
                 font=("Segoe UI", 9, "bold"), pady=6,
             ).grid(row=0, column=j, sticky="ew", padx=2, pady=2)
             grilla.columnconfigure(j, weight=1, uniform="dias")
-        for i in range(1, 5):
-            tk.Label(
-                grilla, text=f"Semana {i}", bg=MORADO_CLARO, fg=MORADO,
-                font=("Segoe UI", 9, "bold"), padx=8,
-            ).grid(row=i, column=0, sticky="nsew", padx=2, pady=2)
+        self.filas_semana = {}
+        for i in range(1, 7):  # un mes ocupa 4 a 6 semanas de calendario
+            etq = tk.Label(
+                grilla, text="", bg=MORADO_CLARO, fg=MORADO,
+                font=("Segoe UI", 8, "bold"), padx=6, width=9,
+            )
+            etq.grid(row=i, column=0, sticky="nsew", padx=2, pady=2)
+            fila_celdas = []
             for j, dia in enumerate(DIAS, start=1):
                 lbl = tk.Label(
                     grilla, text="", bg="#F1F1F5", fg=TEXTO, cursor="hand2",
@@ -486,10 +563,12 @@ class AplicacionTurnosGUI:
                 lbl.grid(row=i, column=j, sticky="nsew", padx=2, pady=2)
                 self._hacer_arrastrable(lbl, {"tipo": "dia_ind", "clave": (i, dia)})
                 self.celdas[(i, dia)] = lbl
+                fila_celdas.append(lbl)
+            self.filas_semana[i] = (etq, fila_celdas)
 
         tk.Label(
             c_malla,
-            text="Verde = turno diurno   ·   Morado = turno nocturno   ·   Gris = libre   ·   Bajo el código: horas del turno (inicio-fin)",
+            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  Gris = libre  ·  Número = fecha, luego el código y bajo él las horas  ·  Días tenues = mes vecino",
             bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), anchor="w",
         ).pack(fill=tk.X, pady=(8, 0))
 
@@ -529,10 +608,10 @@ class AplicacionTurnosGUI:
         botones = tk.Frame(c_edit, bg=BLANCO)
         botones.pack(fill=tk.X)
         tk.Label(
-            botones, text="② Elija el nuevo estado (o arrastre un día a otro casillero):", bg=BLANCO,
+            botones, text="② Cambie este día (o arrástrelo a otro casillero):", bg=BLANCO,
             fg=GRIS, font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=(0, 10))
-        for estado in ESTADOS_CELDA:
+        for estado in ESTADOS_DIA_EDITABLES:
             bg, fg = _colores(estado)
             nombre = NOMBRES_ESTADO.get(str(estado).upper(), "")
             texto = f"{estado}" + (f"  {nombre}" if nombre else "")
@@ -542,11 +621,26 @@ class AplicacionTurnosGUI:
                 height=34, fondo=BLANCO, fuente=("Segoe UI", 9, "bold"), radio=12,
             ).pack(side=tk.LEFT, padx=3)
 
+        # Vacaciones y licencias médicas: se cargan por rango de fechas
+        aus = tk.Frame(c_edit, bg=BLANCO)
+        aus.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(
+            aus, text="Ausencias por fechas:", bg=BLANCO, fg=GRIS, font=("Segoe UI", 10),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        for modo, texto in (("VAC", "VAC  Vacaciones…"), ("LM", "LM  Licencia médica…"), ("QUITAR", "Quitar ausencia…")):
+            bg, fg = _colores(modo) if modo != "QUITAR" else ("#E9E9EF", "#333333")
+            BotonRedondo(
+                aus, texto, lambda m=modo: self._dialogo_ausencia(m), bg=bg,
+                hover=_oscurecer(bg, 0.88), fg=fg, width=max(70, 9 * len(texto) + 24),
+                height=34, fondo=BLANCO, fuente=("Segoe UI", 9, "bold"), radio=12,
+            ).pack(side=tk.LEFT, padx=3)
+
         # Leyenda normativa
         tk.Label(
             der,
             text="Normativa: Art. 38 Código del Trabajo — mínimo 2 domingos libres en jornada diurna "
-                 "y 2 fines de semana (sábado + domingo) libres en jornada nocturna.",
+                 "y 2 fines de semana (sábado + domingo) libres en jornada nocturna. "
+                 f"Operación: al menos {MIN_PERSONAS_POR_DIA} personas trabajando cada día.",
             bg=MORADO_CLARO, fg=MORADO_OSC, justify="left", anchor="w",
             wraplength=760, padx=12, pady=10, font=("Segoe UI", 9),
         ).pack(fill=tk.X, pady=(12, 0))
@@ -562,20 +656,66 @@ class AplicacionTurnosGUI:
     def _nombre_completo(p: dict) -> str:
         return f"{p['nombre']} {p.get('apellido') or ''}".strip()
 
+    def _criterios_lista(self) -> dict:
+        f = self.filtros_lista
+        cuad = f["cuadrante"].get()
+        turno = f["turno"].get()
+        jorn = f["jornada"].get()
+        tipo = f["tipo"].get()
+        return dict(
+            texto=self.var_busqueda.get(),
+            cuadrante=(None if f["cuadrante"].current() <= 0 else
+                       (ServicioTurnos.SIN_CUADRANTE_FILTRO if cuad == SIN_CUADRANTE else cuad)),
+            turno=turno[-1] if f["turno"].current() > 0 else None,
+            jornada=jorn.upper() if f["jornada"].current() > 0 else None,
+            tipo=tipo if f["tipo"].current() > 0 else None,
+        )
+
+    def _limpiar_filtros(self) -> None:
+        self.var_busqueda.set("")
+        for cb in self.filtros_lista.values():
+            cb.current(0)
+        self._cargar_lista_personal()
+
+    @staticmethod
+    def _linea_persona(p: dict) -> str:
+        partes = [f"{p['nombre']}"]
+        if p["rol"] != ROL_PATRULLERO:
+            partes.append(etiqueta_rol(p["rol"]))
+        partes.append(f"{p['grupo_turno']} {p['jornada'][:3].capitalize()}" if p["jornada"] else "Sin turno")
+        if p.get("cuadrante"):
+            partes.append(p["cuadrante"].replace("Cuadrante ", "C"))
+        if p.get("modalidades"):
+            partes.append("/".join(p["modalidades"]))
+        return "  " + "  ·  ".join(partes)
+
     def _cargar_lista_personal(self, seleccionar_ultimo: bool = False) -> None:
+        """Rellena la lista aplicando la búsqueda y los filtros; conserva la persona elegida."""
+        previo, _ = self._id_seleccionado() if getattr(self, "personal_ids", None) else (None, None)
+        todos = self.servicio.listar_personal()
+        visibles = self.servicio.filtrar_personal(**self._criterios_lista())
         self.personal_ids = []
         self.personal_etiquetas = []
         self.lista_personal.delete(0, tk.END)
-        for p in self.servicio.listar_personal():
-            turno = f"Turno {p['grupo_turno']} · {p['jornada'].capitalize()}" if p["jornada"] else "Sin turno"
-            etiqueta = f"{self._nombre_completo(p)} ({p['rol']})"
+        for p in visibles:
             self.personal_ids.append(p["id"])
-            self.personal_etiquetas.append(etiqueta)
-            self.lista_personal.insert(tk.END, f"  {etiqueta}  ·  {turno}")
-        if self.personal_etiquetas:
-            idx = len(self.personal_etiquetas) - 1 if seleccionar_ultimo else 0
+            self.personal_etiquetas.append(f"{self._nombre_completo(p)} ({etiqueta_rol(p['rol'])})")
+            self.lista_personal.insert(tk.END, self._linea_persona(p))
+        self.lbl_conteo.config(
+            text=f"{len(visibles)} de {len(todos)} personas" if len(visibles) != len(todos) else f"{len(todos)} personas"
+        )
+        if self.personal_ids:
+            if seleccionar_ultimo:
+                idx = max(range(len(visibles)), key=lambda k: visibles[k]["id"])
+            elif previo in self.personal_ids:
+                idx = self.personal_ids.index(previo)
+            else:
+                idx = 0
             self.lista_personal.selection_set(idx)
             self.lista_personal.see(idx)
+            if previo != self.personal_ids[idx] or seleccionar_ultimo:
+                self._on_seleccion_personal()
+        else:
             self._on_seleccion_personal()
 
     def _on_seleccion_personal(self) -> None:
@@ -583,9 +723,13 @@ class AplicacionTurnosGUI:
         self.lbl_celda.config(text="① Haga clic en un día de la grilla", fg=GRIS)
         self._mostrar_malla_guardada()
 
+    def _rol_nuevo(self) -> str:
+        """Cargo elegido en el formulario (el combo muestra el nombre legible)."""
+        return next((r for r in ROLES_PERSONAL if etiqueta_rol(r) == self.combo_rol.get()), ROL_PATRULLERO)
+
     def _actualizar_modalidades_nuevo(self) -> None:
         """Las modalidades solo se pueden marcar si el cargo es patrullero."""
-        es_patrullero = self.combo_rol.get() == ROL_PATRULLERO
+        es_patrullero = self._rol_nuevo() == ROL_PATRULLERO
         for chk in self.checks_mod_nuevo:
             chk.configure(state=tk.NORMAL if es_patrullero else tk.DISABLED)
         if not es_patrullero:
@@ -600,7 +744,7 @@ class AplicacionTurnosGUI:
             cuadrante = None if self.combo_cuad_nuevo.current() == 0 else self.combo_cuad_nuevo.get()
             modalidades = [m for m, v in self.vars_mod_nuevo.items() if v.get()]
             self.servicio.crear_integrante(
-                nombre, self.combo_rol.get(), turno, jornada, cuadrante, modalidades
+                nombre, self._rol_nuevo(), turno, jornada, cuadrante, modalidades
             )
             self.entry_nombre.delete(0, tk.END)
             self.combo_cuad_nuevo.current(0)
@@ -618,10 +762,62 @@ class AplicacionTurnosGUI:
     # ------------------------------------------------------------- malla / grilla
     def _limpiar_grilla(self) -> None:
         self.malla_actual.clear()
-        for lbl in self.celdas.values():
-            lbl.config(text="", bg="#F1F1F5", highlightbackground=BLANCO)
+        self._pintar_calendario_base()
         self.cuadrante_actual = None
         self._pintar_mapa()
+
+    # ------------------------------------------------------------ período (mes)
+    def _sincronizar_periodo(self) -> None:
+        anio, mes = self.servicio.periodo
+        self.combo_mes.current(mes - 1)
+        self.combo_anio.set(anio)
+
+    def _cambiar_mes(self, delta: int) -> None:
+        self.servicio.mover_periodo(delta)
+        self._al_cambiar_periodo()
+
+    def _elegir_periodo(self) -> None:
+        try:
+            self.servicio.fijar_periodo(int(self.combo_anio.get()), self.combo_mes.current() + 1)
+        except (ValueError, tk.TclError):
+            return
+        self._al_cambiar_periodo()
+
+    def _ir_a_hoy(self) -> None:
+        hoy = date.today()
+        self.servicio.fijar_periodo(hoy.year, hoy.month)
+        self._al_cambiar_periodo()
+
+    def _al_cambiar_periodo(self) -> None:
+        self._sincronizar_periodo()
+        self.celda_sel = None
+        self._mostrar_malla_guardada()
+        self._refrescar_vistas()
+
+    def _pintar_calendario_base(self) -> None:
+        """Dibuja las casillas del mes con sus fechas reales (el mes parte en distinto día cada vez)."""
+        _anio, mes = self.servicio.periodo
+        semanas = self.servicio.semanas_calendario()
+        self.fecha_celda, self.clave_de_fecha = {}, {}
+        for i in range(1, 7):
+            etq, celdas = self.filas_semana[i]
+            if i > len(semanas):
+                etq.grid_remove()
+                for lbl in celdas:
+                    lbl.grid_remove()
+                continue
+            sem = semanas[i - 1]
+            etq.grid()
+            etq.config(text=f"{sem[0].day} {cal.NOMBRES_MES_CORTO[sem[0].month - 1]}\n– {sem[6].day} {cal.NOMBRES_MES_CORTO[sem[6].month - 1]}")
+            for dia, d, lbl in zip(DIAS, sem, celdas):
+                lbl.grid()
+                self.fecha_celda[(i, dia)] = d
+                self.clave_de_fecha[d] = (i, dia)
+                en_mes = d.month == mes
+                lbl.config(
+                    text=str(d.day), bg="#F1F1F5" if en_mes else "#F8F8FB",
+                    fg=GRIS if en_mes else "#C3C3D2", highlightbackground=BLANCO,
+                )
 
     def _descargar_excel_individual(self) -> None:
         personal_id, _etq = self._id_seleccionado()
@@ -661,40 +857,47 @@ class AplicacionTurnosGUI:
             return
 
         self.lbl_nombre.config(text=etiqueta)
-        malla = self.repositorio.obtener_malla_personal(personal_id)
+        malla = self.servicio.malla_vista(personal_id)
         persona = self.repositorio.obtener_persona(personal_id) or {}
         # el cuadrante es propio de la persona, tenga o no malla
         self.cuadrante_actual = persona.get("cuadrante") or None
         self.combo_cuad_ind.set(self.cuadrante_actual or SIN_CUADRANTE)
         self._pintar_mapa()
 
-        if not malla:
+        anio, mes = self.servicio.periodo
+        del_mes = [f for f in malla if (f["fecha"].year, f["fecha"].month) == (anio, mes)]
+        if not del_mes:
             self.lbl_detalle.config(
-                text="Sin malla asignada aún — use «Asignar malla individual» o «Planificar equipo 24/7»",
+                text=f"Sin malla en {cal.etiqueta_mes(anio, mes)} — use «Asignar malla individual» "
+                     "o «Planificar equipo 24/7»",
                 bg="#FFF3D6", fg="#7A5200",
             )
-            return
-
-        info = malla[0]
-        jornadas = {f["jornada"] for f in malla}
-        horarios = sorted({f["horario"] for f in malla})
-        jornada_txt = info["jornada"] if len(jornadas) == 1 else "ROTATIVO DÍA/NOCHE"
-        modalidades = self.servicio.obtener_modalidades_persona(personal_id)
-        texto = (
-            f"Turno {info['grupo_turno']} ({jornada_txt})   ·   "
-            f"Horario: {' / '.join(horarios)}   ·   {self.cuadrante_actual or 'Sin cuadrante'}"
-        )
-        if modalidades:
-            texto += "   ·   " + " + ".join(modalidades)
-        self.lbl_detalle.config(text=texto, bg=VERDE_CLARO, fg=VERDE_OSC)
+        else:
+            info = del_mes[0]
+            jornadas = {f["jornada"] for f in del_mes}
+            horarios = sorted({f["horario"] for f in del_mes})
+            jornada_txt = info["jornada"] if len(jornadas) == 1 else "ROTATIVO DÍA/NOCHE"
+            modalidades = self.servicio.obtener_modalidades_persona(personal_id)
+            texto = (
+                f"{cal.etiqueta_mes(anio, mes)}   ·   Turno {info['grupo_turno']} ({jornada_txt})   ·   "
+                f"Horario: {' / '.join(horarios)}   ·   {self.cuadrante_actual or 'Sin cuadrante'}"
+            )
+            if modalidades:
+                texto += "   ·   " + " + ".join(modalidades)
+            self.lbl_detalle.config(text=texto, bg=VERDE_CLARO, fg=VERDE_OSC)
 
         for fila in malla:
-            clave = (fila["semana_mes"], fila["dia_semana"])
-            self.malla_actual[clave] = (fila["id"], fila["estado"], fila["jornada"])
+            clave = self.clave_de_fecha.get(fila["fecha"])
             lbl = self.celdas.get(clave)
-            if lbl:
-                txt, bg, fg = _estilo_celda(fila["estado"], fila["jornada"], fila["horario"])
-                lbl.config(text=txt, bg=bg, fg=fg)
+            if lbl is None:
+                continue
+            txt, bg, fg = _estilo_celda(fila["estado"], fila["jornada"], fila["horario"])
+            dia = fila["fecha"].day
+            if fila["fecha"].month == mes:
+                self.malla_actual[clave] = (fila["id"], fila["estado"], fila["jornada"])
+                lbl.config(text=f"{dia} · {txt}", bg=bg, fg=fg)
+            else:  # día del mes vecino: se muestra tenue y no se edita desde aquí
+                lbl.config(text=f"{dia} · {txt}", bg="#F1EDF6", fg="#9A8FB0")
 
         if self.celda_sel:
             self._resaltar_celda()
@@ -702,9 +905,9 @@ class AplicacionTurnosGUI:
     def _seleccionar_celda(self, semana: int, dia: str) -> None:
         self.celda_sel = (semana, dia)
         self._resaltar_celda()
-        self.lbl_celda.config(
-            text=f"① Seleccionado: Semana {semana} · {dia}", fg=MORADO,
-        )
+        fecha = self.fecha_celda.get((semana, dia))
+        cuando = f"{fecha.day} de {cal.NOMBRES_MES[fecha.month - 1].lower()} · {dia}" if fecha else dia
+        self.lbl_celda.config(text=f"① Seleccionado: {cuando}", fg=MORADO)
 
     def _resaltar_celda(self) -> None:
         for clave, lbl in self.celdas.items():
@@ -721,7 +924,13 @@ class AplicacionTurnosGUI:
 
         datos = self.malla_actual.get(self.celda_sel)
         if datos is None:
-            messagebox.showwarning("Atención", "Primero debe asignar una malla al integrante.")
+            fecha = self.fecha_celda.get(self.celda_sel)
+            if fecha and fecha.month != self.servicio.periodo[1]:
+                messagebox.showinfo(
+                    "Atención", "Ese día pertenece a otro mes: cambie de mes (◀ ▶) para editarlo."
+                )
+            else:
+                messagebox.showwarning("Atención", "Primero debe asignar una malla al integrante.")
             return
 
         try:
@@ -729,33 +938,216 @@ class AplicacionTurnosGUI:
             self._mostrar_malla_guardada()
             self._refrescar_vistas()
         except ValueError as err:
-            messagebox.showerror("Bloqueo Legal (Art. 38)", str(err))
+            messagebox.showerror("No se puede cambiar el día", str(err))
 
-    # ------------------------------------------------------------------ eliminar
-    def _editar_nombre(self) -> None:
+    # ------------------------------------------------- vacaciones / licencias
+    def _dialogo_ausencia(self, modo: str) -> None:
+        """Pide un rango de fechas y carga (o quita) vacaciones / licencia médica de la persona elegida."""
         personal_id, etiqueta = self._id_seleccionado()
         if personal_id is None:
             messagebox.showwarning("Atención", "Seleccione primero un integrante de la lista.")
             return
-        actual = next((p["nombre"] for p in self.servicio.listar_personal() if p["id"] == personal_id), "")
-        nuevo = simpledialog.askstring(
-            "Editar nombre", "Nuevo nombre:", initialvalue=actual, parent=self.root
+        titulo = {"VAC": "Vacaciones", "LM": "Licencia médica (LM)", "QUITAR": "Quitar vacaciones / licencia"}[modo]
+        anio_p, mes_p = self.servicio.periodo
+        inicio = self.fecha_celda.get(self.celda_sel) if self.celda_sel else None
+        if inicio is None:
+            inicio = date(anio_p, mes_p, 1)
+        dlg = tk.Toplevel(self.root)
+        dlg.title(titulo)
+        dlg.configure(bg=FONDO)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        tk.Label(
+            dlg, text=f"{titulo} · {etiqueta}", bg=MORADO, fg=BLANCO,
+            font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
+        ).pack(fill=tk.X)
+        tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
+        cu = tk.Frame(dlg, bg=BLANCO, padx=16, pady=12)
+        cu.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        anios = list(range(2024, 2036))
+
+        def selector(fila, texto, fecha):
+            tk.Label(cu, text=texto, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 10, "bold")).grid(
+                row=fila, column=0, sticky="w", pady=4)
+            d = ttk.Combobox(cu, values=list(range(1, 32)), state="readonly", width=4)
+            m = ttk.Combobox(cu, values=cal.NOMBRES_MES, state="readonly", width=11)
+            a = ttk.Combobox(cu, values=anios, state="readonly", width=6)
+            d.set(fecha.day)
+            m.current(fecha.month - 1)
+            a.set(fecha.year)
+            for k, w in enumerate((d, m, a)):
+                w.grid(row=fila, column=k + 1, padx=(8 if k == 0 else 4, 0))
+            return d, m, a
+
+        sel_desde = selector(0, "Desde", inicio)
+        sel_hasta = selector(1, "Hasta", inicio)
+
+        def leer(sel):
+            try:
+                return date(int(sel[2].get()), sel[1].current() + 1, int(sel[0].get()))
+            except (ValueError, TypeError):
+                raise ValueError("Una de las fechas no existe en el calendario (revise el día del mes).")
+
+        explica = {
+            "VAC": "Se marcan como vacaciones (V) todos los días con malla de ese rango.",
+            "LM": "Se marcan como licencia médica (LM) todos los días con malla de ese rango.",
+            "QUITAR": "Los días con vacaciones o licencia de ese rango vuelven a lo que tenían antes.",
+        }[modo]
+        tk.Label(cu, text=explica, bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), wraplength=360,
+                 justify="left").grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        def aplicar():
+            try:
+                desde, hasta = leer(sel_desde), leer(sel_hasta)
+                if modo == "QUITAR":
+                    n = self.servicio.quitar_ausencia(personal_id, desde, hasta)
+                    res = None
+                else:
+                    res = self.servicio.aplicar_ausencia(personal_id, desde, hasta, modo)
+                    n = res["aplicados"]
+            except ValueError as err:
+                messagebox.showerror("No se pudo guardar", str(err), parent=dlg)
+                return
+            dlg.destroy()
+            self.celda_sel = None
+            self._mostrar_malla_guardada()
+            self._refrescar_vistas()
+            rango = f"{desde.day} {cal.NOMBRES_MES_CORTO[desde.month - 1]} – {hasta.day} {cal.NOMBRES_MES_CORTO[hasta.month - 1]} {hasta.year}"
+            if modo == "QUITAR":
+                messagebox.showinfo("Ausencia quitada", f"{n} día(s) vuelven a su estado anterior ({rango}).")
+                return
+            texto = f"{titulo}: {n} día(s) marcados ({rango})."
+            if res["sin_malla"]:
+                texto += f"\n{res['sin_malla']} día(s) del rango no tienen malla y no se modificaron."
+            bajo = res["bajo_minimo"]
+            if bajo:
+                lista = ", ".join(f"{d.day}/{d.month} ({n})" for d, n in bajo[:12]) + ("…" if len(bajo) > 12 else "")
+                texto += (f"\n\n⚠ Quedan menos de {MIN_PERSONAS_POR_DIA} personas en servicio estos días: {lista}.\n"
+                          "Revise la pestaña «Malla del equipo» para reforzar con horas extra o reasignar.")
+            messagebox.showinfo("Ausencia registrada", texto)
+
+        fila = tk.Frame(cu, bg=BLANCO)
+        fila.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        fila.columnconfigure(0, weight=1)
+        fila.columnconfigure(1, weight=1)
+        self._btn(fila, text="Guardar" if modo != "QUITAR" else "Quitar", style="Verde.TButton",
+                  command=aplicar).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._btn(fila, text="Cancelar", style="Morado.TButton", command=dlg.destroy).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0))
+
+    # ------------------------------------------------------------------ eliminar
+    def _editar_persona(self) -> None:
+        """Ventana para editar todos los datos de la persona elegida."""
+        personal_id, _etq = self._id_seleccionado()
+        if personal_id is None:
+            messagebox.showwarning("Atención", "Seleccione primero un integrante de la lista.")
+            return
+        p = self.repositorio.obtener_persona(personal_id)
+        mods_actuales = set(self.servicio.obtener_modalidades_persona(personal_id))
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Editar datos del integrante")
+        dlg.configure(bg=FONDO)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        tk.Label(
+            dlg, text=f"Editar datos · {self._nombre_completo(p)}", bg=MORADO, fg=BLANCO,
+            font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
+        ).pack(fill=tk.X)
+        tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
+        cu = tk.Frame(dlg, bg=BLANCO, padx=16, pady=12)
+        cu.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        cu.columnconfigure(0, weight=1)
+        cu.columnconfigure(1, weight=1)
+
+        def etiqueta(texto, fila, col=0):
+            tk.Label(cu, text=texto, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9)).grid(
+                row=fila, column=col, sticky="w", padx=(8 if col else 0, 0))
+
+        etiqueta("Nombre", 0)
+        e_nombre = ttk.Entry(cu)
+        e_nombre.insert(0, p["nombre"])
+        e_nombre.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        etiqueta("Cargo / Rol", 2)
+        c_rol = ttk.Combobox(cu, values=[etiqueta_rol(r) for r in ROLES_PERSONAL], state="readonly")
+        c_rol.set(etiqueta_rol(p["rol"]))
+        c_rol.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        etiqueta("Turno", 4)
+        etiqueta("Jornada", 4, 1)
+        c_turno = ttk.Combobox(cu, values=GRUPOS_TURNO, state="readonly", width=6)
+        c_turno.set(p["grupo_turno"])
+        c_turno.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        c_jorn = ttk.Combobox(cu, values=JORNADAS, state="readonly", width=12)
+        c_jorn.set(p["jornada"])
+        c_jorn.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        etiqueta("Cuadrante", 6)
+        c_cuad = ttk.Combobox(cu, values=(SIN_CUADRANTE, *DESTINOS_SERVICIO), state="readonly")
+        c_cuad.set(p.get("cuadrante") or SIN_CUADRANTE)
+        c_cuad.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        etiqueta("Modalidades (solo patrulleros)", 8)
+        marco = tk.Frame(cu, bg=BLANCO)
+        marco.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        vars_mod, checks = {}, []
+        for k, m in enumerate(MODALIDADES):
+            v = tk.BooleanVar(value=m in mods_actuales)
+            vars_mod[m] = v
+            chk = tk.Checkbutton(marco, text=m, variable=v, bg=BLANCO, activebackground=BLANCO,
+                                 selectcolor=BLANCO, font=("Segoe UI", 9), anchor="w")
+            chk.grid(row=k // 2, column=k % 2, sticky="w", padx=(0, 16))
+            checks.append(chk)
+        etiqueta("Va en el móvil de (solo jefe de turno)", 10)
+        moviles = [m for m in self.servicio.moviles_disponibles() if m["id"] != personal_id]
+        c_movil = ttk.Combobox(
+            cu, values=[SIN_MOVIL] + [f"{self._nombre_completo(m)} ({m.get('cuadrante') or 'sin cuadrante'})" for m in moviles],
+            state="readonly",
         )
-        if nuevo is None:
-            return
-        try:
-            self.servicio.renombrar_integrante(personal_id, nuevo)
-        except ValueError as err:
-            messagebox.showerror("Error", str(err))
-            return
-        sel = self.lista_personal.curselection()
-        self._cargar_lista_personal()
-        if sel:  # vuelve a la misma fila
-            self.lista_personal.selection_clear(0, tk.END)
-            self.lista_personal.selection_set(sel[0])
-            self.lista_personal.see(sel[0])
-            self._on_seleccion_personal()
-        self._refrescar_vistas()
+        ids_mov = [m["id"] for m in moviles]
+        c_movil.current(ids_mov.index(p["movil_id"]) + 1 if p.get("movil_id") in ids_mov else 0)
+        c_movil.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+        def rol_elegido():
+            return next((r for r in ROLES_PERSONAL if etiqueta_rol(r) == c_rol.get()), ROL_PATRULLERO)
+
+        def ajustar(*_):
+            es_pat = rol_elegido() == ROL_PATRULLERO
+            for chk in checks:
+                chk.configure(state=tk.NORMAL if es_pat else tk.DISABLED)
+            if not es_pat:
+                for v in vars_mod.values():
+                    v.set(False)
+            c_movil.configure(state="readonly" if rol_elegido() == ROL_JEFE_TURNO else "disabled")
+            if rol_elegido() != ROL_JEFE_TURNO:
+                c_movil.current(0)
+
+        c_rol.bind("<<ComboboxSelected>>", ajustar)
+        ajustar()
+
+        def guardar():
+            k = c_movil.current()
+            try:
+                avisos = self.servicio.editar_integrante(
+                    personal_id, e_nombre.get(), rol_elegido(), c_turno.get(), c_jorn.get(),
+                    None if c_cuad.current() == 0 else c_cuad.get(),
+                    [m for m, v in vars_mod.items() if v.get()],
+                    ids_mov[k - 1] if k and k > 0 else None,
+                )
+            except ValueError as err:
+                messagebox.showerror("No se pudo guardar", str(err), parent=dlg)
+                return
+            dlg.destroy()
+            self.celda_sel = None
+            self._cargar_lista_personal()
+            self._mostrar_malla_guardada()
+            self._refrescar_vistas()
+            if avisos:
+                messagebox.showinfo("Datos guardados", "\n\n".join(avisos))
+
+        fila = tk.Frame(cu, bg=BLANCO)
+        fila.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        fila.columnconfigure(0, weight=1)
+        fila.columnconfigure(1, weight=1)
+        self._btn(fila, text="Guardar cambios", style="Verde.TButton", command=guardar).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._btn(fila, text="Cancelar", style="Morado.TButton", command=dlg.destroy).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        e_nombre.focus_set()
 
     def _abrir_carga_masiva(self) -> None:
         dlg = tk.Toplevel(self.root)
@@ -893,8 +1285,24 @@ class AplicacionTurnosGUI:
         """Redibuja las pestañas del equipo y de modalidad con los datos actuales."""
         if not hasattr(self, "interior_equipo"):
             return
-        self._dibujar_malla_equipo()
-        self._pintar_modalidad()
+        # solo se redibuja la pestaña a la vista; la otra se marca y se pinta al abrirla
+        self._sucio = {1, 2}
+        self._pintar_pestana_visible()
+
+    def _pintar_pestana_visible(self) -> None:
+        try:
+            actual = self.notebook.index("current")
+        except Exception:
+            actual = None
+        if not isinstance(actual, int):
+            actual = None  # sin información: se pintan todas
+        sucio = getattr(self, "_sucio", {1, 2})
+        if 1 in sucio and actual in (None, 1):
+            sucio.discard(1)
+            self._dibujar_malla_equipo()
+        if 2 in sucio and actual in (None, 2):
+            sucio.discard(2)
+            self._pintar_modalidad()
 
     # --------------------------------------------------------- arrastrar y soltar
     def _hacer_arrastrable(self, widget, datos, destino=True) -> None:
@@ -995,8 +1403,12 @@ class AplicacionTurnosGUI:
     def _mover_dia_individual(self, desde, hasta) -> None:
         personal_id, _ = self._id_seleccionado()
         a, b = self.malla_actual.get(desde), self.malla_actual.get(hasta)
+        mes_actual = self.servicio.periodo[1]
+        if any(self.fecha_celda.get(c) and self.fecha_celda[c].month != mes_actual for c in (desde, hasta)):
+            messagebox.showinfo("Atención", "Solo se pueden mover días del mes que se está viendo.")
+            return
         if personal_id is None or a is None or b is None:
-            messagebox.showwarning("Atención", "Ese integrante aún no tiene malla asignada.")
+            messagebox.showwarning("Atención", "Ese integrante aún no tiene malla asignada en este mes.")
             return
         try:
             self.servicio.intercambiar_dias(personal_id, a[0], b[0])
@@ -1066,6 +1478,15 @@ class AplicacionTurnosGUI:
         marco = tk.Frame(tab, bg=BLANCO, highlightbackground="#DDD3E8", highlightthickness=1)
         marco.pack(fill=tk.BOTH, expand=True)
         self.interior_equipo = self._marco_scroll(marco)
+
+    def _texto_empalme(self) -> str:
+        """Aviso sobre el empalme con los meses vecinos tras asignar una malla."""
+        avisos = self.servicio.avisos_empalme
+        if not avisos:
+            return "\n\n✔ Empalma con el mes anterior y el siguiente."
+        return "\n\n⚠ Empalme con los meses vecinos:\n" + "\n".join(avisos[:8]) + (
+            f"\n… y {len(avisos) - 8} más." if len(avisos) > 8 else ""
+        )
 
     def _descargar_excel(self, personal_ids) -> None:
         """Guarda la malla (de todo el equipo o de una persona) en un archivo Excel."""
@@ -1155,7 +1576,9 @@ class AplicacionTurnosGUI:
             if datos["patrulleros_sin_modalidad"]:
                 extra.append(f"Patrull. sin modalidad {datos['patrulleros_sin_modalidad']}")
             for rol, n in datos["por_rol"].items():
-                extra.append(f"{rol.replace('_', ' ').capitalize()} {n}")
+                extra.append(f"{etiqueta_rol(rol)} {n}")
+            for nombre_jefe, movil in datos.get("jefes", []):
+                extra.append(f"  ↳ {nombre_jefe}" + (f" en móvil de {movil}" if movil else ""))
             tk.Label(
                 tarjeta, text="\n".join(extra) if extra else " ", bg=BLANCO,
                 fg=ROJO if nombre in resumen["faltan_movil"] else GRIS,
@@ -1205,6 +1628,7 @@ class AplicacionTurnosGUI:
 
         orden_rol = {rol: i for i, rol in enumerate(ROLES_PERSONAL)}
         orden_turno = {g: i for i, g in enumerate(GRUPOS_TURNO)}
+        nombre_por_id = {d["persona"]["id"]: self._nombre_completo(d["persona"]) for d in datos}
 
         def grupo_de(d):
             return d["persona"]["grupo_turno"] or (d["malla"][0]["grupo_turno"] if d["malla"] else None)
@@ -1219,21 +1643,32 @@ class AplicacionTurnosGUI:
             tk.Label(
                 interior, text=titulo, bg=MORADO_CLARO, fg=MORADO, width=ancho, anchor="w",
                 font=("Segoe UI", 9, "bold"), padx=4,
-            ).grid(row=0, column=c, rowspan=2, sticky="nsew", padx=1, pady=1)
+            ).grid(row=0, column=c, rowspan=3, sticky="nsew", padx=1, pady=1)
         base = len(cols_fijas)
-        for sem in range(4):
-            tk.Label(
-                interior, text=f"Semana {sem + 1}", bg=MORADO_CLARO, fg=MORADO,
-                font=("Segoe UI", 8, "bold"),
-            ).grid(row=0, column=base + sem * 7, columnspan=7, sticky="ew", padx=1, pady=1)
-            for d in range(7):
-                tk.Label(
-                    interior, text="LMMJVSD"[d], bg=BLANCO, fg=GRIS,
-                    font=("Segoe UI", 8, "bold"), width=3,
-                ).grid(row=1, column=base + sem * 7 + d)
+        dias = cal.dias_del_mes(*self.servicio.periodo)
+        n_dias = len(dias)
+        tk.Label(
+            interior, text=self.servicio.etiqueta_periodo(), bg=MORADO, fg=BLANCO,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=base, columnspan=n_dias, sticky="ew", padx=1, pady=1)
 
+        def encabezado_dias(fila0: int) -> None:
+            """Dos filas: letra del día y número de fecha (fin de semana resaltado)."""
+            for k, d in enumerate(dias):
+                finde = d.weekday() >= 5
+                fondo = "#E3D5F2" if finde else MORADO_CLARO
+                tk.Label(
+                    interior, text=cal.LETRAS_DIA[d.weekday()], bg=fondo, fg=MORADO,
+                    font=("Segoe UI", 8, "bold"), width=3,
+                ).grid(row=fila0, column=base + k, padx=1, pady=(1, 0))
+                tk.Label(
+                    interior, text=str(d.day), bg=fondo, fg=MORADO_OSC,
+                    font=("Segoe UI", 8, "bold"), width=3,
+                ).grid(row=fila0 + 1, column=base + k, padx=1, pady=(0, 1))
+
+        encabezado_dias(1)
         presencia = {}
-        fila = 2
+        fila = 3
         grupo_previo = "—"
         for d in datos:
             persona, malla = d["persona"], d["malla"]
@@ -1247,9 +1682,9 @@ class AplicacionTurnosGUI:
                     else f"  SIN TURNO ASIGNADO · {cantidad} integrante(s)",
                     bg=(MORADO if grupo == "A" else VERDE if grupo == "B" else "#6B6B7B"),
                     fg=BLANCO, anchor="w", font=("Segoe UI", 9, "bold"), pady=3,
-                ).grid(row=fila, column=0, columnspan=base + 28, sticky="ew", padx=1, pady=(6, 2))
+                ).grid(row=fila, column=0, columnspan=base + n_dias, sticky="ew", padx=1, pady=(6, 2))
                 fila += 1
-            celdas = {(f["semana_mes"], f["dia_semana"]): f for f in malla}
+            celdas = {f["fecha"]: f for f in malla}
             if malla:
                 jornadas = {f["jornada"] for f in malla}
                 horarios = sorted({f["horario"] for f in malla})
@@ -1266,8 +1701,10 @@ class AplicacionTurnosGUI:
             cuadrante = (persona.get("cuadrante") or "—").replace("Cuadrante ", "C")
             textos = (
                 "≡ " + self._nombre_completo(persona),
-                persona["rol"].replace("_", " ").capitalize(),
-                turno, horario, cuadrante, " + ".join(d["modalidades"]) or "—",
+                etiqueta_rol(persona["rol"]),
+                turno, horario, cuadrante,
+                (f"Móvil de {nombre_por_id[persona['movil_id']]}"
+                 if persona.get("movil_id") in nombre_por_id else " + ".join(d["modalidades"]) or "—"),
             )
             for c, (txt, ancho) in enumerate(zip(textos, anchos)):
                 lbl = tk.Label(
@@ -1278,18 +1715,17 @@ class AplicacionTurnosGUI:
                 if c == 0:
                     lbl.configure(cursor="hand2")
                     self._hacer_arrastrable(lbl, {"tipo": "persona", "pid": persona["id"]}, destino=False)
-            for k in range(28):
-                sem, dia = k // 7 + 1, DIAS[k % 7]
-                f = celdas.get((sem, dia))
+            for k, dia_fecha in enumerate(dias):
+                f = celdas.get(dia_fecha)
                 if f is None:
                     txt, bg, fg = "", "#F6F6FA", GRIS
                 else:
                     est = f["estado"]
                     _t, bg, fg = _estilo_celda(est, f["jornada"])
-                    txt = {"L": "·", "VAC": "V", "HEN": "HN"}.get(est, est)
+                    txt = {"L": "·", "VAC": "V", "HEN": "HN"}.get(est, est)  # LM se ve como «LM»
                     if est in ("T", "HE", "HEN"):
                         clave = (persona["rol"], f["jornada"])
-                        presencia.setdefault(clave, [0] * 28)[k] += 1
+                        presencia.setdefault(clave, [0] * n_dias)[k] += 1
                 celda = tk.Label(
                     interior, text=txt, bg=bg, fg=fg, width=3, font=("Segoe UI", 8, "bold"),
                 )
@@ -1304,15 +1740,16 @@ class AplicacionTurnosGUI:
         tk.Label(
             interior, text="Personas de turno por día", bg=BLANCO, fg=MORADO,
             font=("Segoe UI", 9, "bold"), anchor="w",
-        ).grid(row=fila, column=0, columnspan=4, sticky="w", pady=(12, 2))
-        fila += 1
+        ).grid(row=fila, column=0, columnspan=4, rowspan=2, sticky="sw", pady=(12, 2))
+        encabezado_dias(fila)  # los días también se ven sobre estas filas
+        fila += 2
         for rol in ROLES_PERSONAL:
             for jornada, nombre in (("DIURNO", "día"), ("NOCTURNO", "noche")):
                 conteo = presencia.get((rol, jornada))
                 if not conteo:
                     continue
                 tk.Label(
-                    interior, text=f"{rol.replace('_', ' ').capitalize()} · {nombre}",
+                    interior, text=f"{etiqueta_rol(rol)} · {nombre}",
                     bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
                 ).grid(row=fila, column=0, columnspan=4, sticky="w")
                 for k, v in enumerate(conteo):
@@ -1322,11 +1759,57 @@ class AplicacionTurnosGUI:
                     ).grid(row=fila, column=base + k, padx=1, pady=1)
                 fila += 1
 
+        conteo_dia = self.servicio.personas_por_dia()
+        if any(conteo_dia):
+            tk.Label(
+                interior, text=f"Total en servicio (mín. {MIN_PERSONAS_POR_DIA})", bg=BLANCO, fg=MORADO,
+                anchor="w", font=("Segoe UI", 9, "bold"),
+            ).grid(row=fila, column=0, columnspan=4, sticky="w", pady=(4, 0))
+            for k, v in enumerate(conteo_dia):
+                ok = v >= MIN_PERSONAS_POR_DIA
+                tk.Label(
+                    interior, text=str(v), width=3, font=("Segoe UI", 8, "bold"),
+                    bg=VERDE_CLARO if ok else ROJO_CLARO, fg=VERDE_OSC if ok else ROJO,
+                ).grid(row=fila, column=base + k, padx=1, pady=(4, 1))
+            fila += 1
+            bajo = self.servicio.dias_bajo_minimo()
+            if bajo:
+                tk.Label(
+                    interior,
+                    text=f"⚠ {len(bajo)} día(s) con menos de {MIN_PERSONAS_POR_DIA} personas: "
+                         + ", ".join(f"{d.day} ({n})" for d, n in bajo[:15]) + ("…" if len(bajo) > 15 else ""),
+                    bg=ROJO_CLARO, fg=ROJO, anchor="w", font=("Segoe UI", 9), padx=6,
+                ).grid(row=fila, column=0, columnspan=base + n_dias, sticky="ew", pady=(2, 0))
+                fila += 1
+
+        for r in self.servicio.dias_bajo_minimo_modalidad():
+            tk.Label(
+                interior, text=f"{r['modalidad']}s · {'día' if r['jornada'] == 'DIURNO' else 'noche'} (mín. {r['minimo']})",
+                bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
+            ).grid(row=fila, column=0, columnspan=4, sticky="w")
+            for k, v in enumerate(r["conteo"]):
+                ok = v >= r["minimo"]
+                tk.Label(
+                    interior, text=str(v), width=3, font=("Segoe UI", 8, "bold"),
+                    bg=VERDE_CLARO if ok else ROJO_CLARO, fg=VERDE_OSC if ok else ROJO,
+                ).grid(row=fila, column=base + k, padx=1, pady=1)
+            fila += 1
+            if r["dias"]:
+                tk.Label(
+                    interior,
+                    text=f"⚠ {r['modalidad']}s ({'día' if r['jornada'] == 'DIURNO' else 'noche'}): "
+                         f"{len(r['dias'])} día(s) con menos de {r['minimo']}: "
+                         + ", ".join(f"{d.day} ({n})" for d, n in r["dias"][:12]) + ("…" if len(r["dias"]) > 12 else ""),
+                    bg=ROJO_CLARO, fg=ROJO, anchor="w", font=("Segoe UI", 9), padx=6,
+                ).grid(row=fila, column=0, columnspan=base + n_dias, sticky="ew", pady=(1, 0))
+                fila += 1
+
         tk.Label(
             interior, text="Horas cubiertas por día (24 = día completo)", bg=BLANCO, fg=MORADO,
             font=("Segoe UI", 9, "bold"), anchor="w",
-        ).grid(row=fila, column=0, columnspan=6, sticky="w", pady=(12, 2))
-        fila += 1
+        ).grid(row=fila, column=0, columnspan=6, rowspan=2, sticky="sw", pady=(12, 2))
+        encabezado_dias(fila)
+        fila += 2
         for g in self.servicio.cobertura_horaria():
             if not g["es_cargo"] and not any(g["horas"]):
                 continue  # Móvil de un cuadrante sin ninguna malla: se informa en las tarjetas
@@ -1359,7 +1842,7 @@ class AplicacionTurnosGUI:
         dlg.transient(self.root)
         dlg.grab_set()
         tk.Label(
-            dlg, text="Turno A y turno B: cada turno trabaja junto", bg=MORADO, fg=BLANCO,
+            dlg, text=f"Turno A y turno B: cada turno trabaja junto · {self.servicio.etiqueta_periodo()}", bg=MORADO, fg=BLANCO,
             font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
         ).pack(fill=tk.X)
         tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
@@ -1423,7 +1906,7 @@ class AplicacionTurnosGUI:
             marco_prev.columnconfigure(0, minsize=170)
             for sem in range(4):
                 tk.Label(
-                    marco_prev, text=f"Semana {sem + 1}", bg=MORADO_CLARO, fg=MORADO,
+                    marco_prev, text=f"Ciclo · sem. {sem + 1}", bg=MORADO_CLARO, fg=MORADO,
                     font=("Segoe UI", 8, "bold"),
                 ).grid(row=0, column=1 + sem * 7, columnspan=7, sticky="ew", padx=1, pady=(6, 1))
                 for d in range(7):
@@ -1482,7 +1965,7 @@ class AplicacionTurnosGUI:
             op = estado["opciones"][var_op.get()]
             if not messagebox.askyesno(
                 "Confirmar",
-                "Se reemplazará la malla mensual de todos los integrantes con turno y jornada "
+                f"Se reemplazará la malla de {self.servicio.etiqueta_periodo()} de todos los integrantes con turno y jornada "
                 f"(turno A: {t['A']['total']}, turno B: {t['B']['total']}).\n¿Continuar?",
                 parent=dlg,
             ):
@@ -1498,7 +1981,8 @@ class AplicacionTurnosGUI:
             avisos = self.servicio.avisos_horarios()
             messagebox.showinfo(
                 "Turnos asignados",
-                f"Se asignó la malla mensual a {n} integrantes."
+                f"Se asignó la malla de {self.servicio.etiqueta_periodo()} a {n} integrantes."
+                + self._texto_empalme()
                 + ("\n\n⚠ Horario sin cubrir las 24 h:\n" + "\n".join(avisos)
                    + "\nAgregue más personal de día o marque los 3 horarios." if avisos
                    else "\n\n✔ Las 24 horas del día quedan cubiertas."),
@@ -1514,7 +1998,7 @@ class AplicacionTurnosGUI:
     # ------------------------------------------------------- pestaña: modalidad
     def _construir_tab_modalidad(self, tab) -> None:
         tk.Label(
-            tab, text="Modalidades y cuadrante de los patrulleros", bg=FONDO, fg=MORADO,
+            tab, text="Modalidades y cuadrante · Jefes de turno", bg=FONDO, fg=MORADO,
             font=("Segoe UI", 13, "bold"), anchor="w",
         ).pack(fill=tk.X)
         tk.Label(
@@ -1575,6 +2059,30 @@ class AplicacionTurnosGUI:
             tab, text="", bg=FONDO, fg=VERDE_OSC, font=("Segoe UI", 10, "bold"), anchor="w",
         )
         self.lbl_resumen_mod.pack(fill=tk.X, pady=(8, 0))
+        self.lbl_turnos_mod = tk.Label(
+            tab, text="", bg=FONDO, fg=VERDE_OSC, font=("Segoe UI", 9), anchor="w", justify="left",
+        )
+        self.lbl_turnos_mod.pack(fill=tk.X)
+
+        tarj = tk.Frame(tab, bg=BLANCO, highlightbackground="#DDD3E8", highlightthickness=1, padx=12, pady=8)
+        tarj.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(
+            tarj, text="Jefe de turno · asignación manual (nunca se reparte automáticamente)",
+            bg=BLANCO, fg=MORADO, font=("Segoe UI", 10, "bold"), anchor="w",
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        for k, t in enumerate(("Jefe de turno", "Va en el móvil de", "Cuadrante")):
+            tk.Label(tarj, text=t, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9)).grid(row=1, column=k, sticky="w")
+        self.combo_jefe = ttk.Combobox(tarj, values=(), state="readonly", width=24)
+        self.combo_movil_jefe = ttk.Combobox(tarj, values=(), state="readonly", width=30)
+        self.combo_cuad_jefe = ttk.Combobox(
+            tarj, values=(SIN_CUADRANTE, *CUADRANTES), state="readonly", width=16
+        )
+        self.combo_jefe.grid(row=2, column=0, sticky="ew", padx=(0, 8))
+        self.combo_movil_jefe.grid(row=2, column=1, sticky="ew", padx=(0, 8))
+        self.combo_cuad_jefe.grid(row=2, column=2, sticky="ew", padx=(0, 8))
+        self._btn(tarj, text="Guardar", style="Verde.TButton", command=self._guardar_jefe).grid(row=2, column=3)
+        self.combo_jefe.bind("<<ComboboxSelected>>", lambda e: self._cargar_jefe_elegido())
+        self._jefes, self._moviles = [], []
 
     def _pintar_modalidad(self) -> None:
         if not hasattr(self, "tabla_mod"):
@@ -1606,9 +2114,66 @@ class AplicacionTurnosGUI:
         for iid in seleccion:
             if self.tabla_mod.exists(iid):
                 self.tabla_mod.selection_add(iid)
+        self._pintar_jefes()
         self.lbl_resumen_mod.config(
             text="  ·  ".join(f"{m}: {n}" for m, n in conteo.items()) + f"  ·  Sin modalidad: {sin_asignar}"
         )
+        lineas, falta = [], False
+        for r in self.servicio.resumen_turnos_modalidad():
+            marca = "✔" if r["cumple"] else "⚠"
+            falta = falta or not r["cumple"]
+            lineas.append(
+                f"{marca} Turno {r['turno']} {r['jornada'].lower()}: "
+                + " · ".join(f"{m} {r[m]}/{mn}" for m, mn in MIN_POR_TURNO_MODALIDAD.items())
+            )
+        self.lbl_turnos_mod.config(
+            text=("Mínimo por turno — " if lineas else "") + "   ".join(lineas),
+            fg=ROJO if falta else VERDE_OSC,
+        )
+
+    def _pintar_jefes(self) -> None:
+        """Rellena la tarjeta del jefe de turno con los jefes y móviles actuales."""
+        personas = self.servicio.listar_personal()
+        self._jefes = [p for p in personas if p["rol"] == ROL_JEFE_TURNO]
+        self._moviles = self.servicio.moviles_disponibles()
+        previo = self.combo_jefe.get()
+        self.combo_jefe["values"] = [self._nombre_completo(p) for p in self._jefes]
+        self.combo_movil_jefe["values"] = [SIN_MOVIL] + [
+            f"{self._nombre_completo(m)} ({m.get('cuadrante') or 'sin cuadrante'})" for m in self._moviles
+        ]
+        nombres = [self._nombre_completo(p) for p in self._jefes]
+        if previo in nombres:
+            self.combo_jefe.set(previo)
+            self._cargar_jefe_elegido()
+        else:
+            self.combo_jefe.set("")
+            self.combo_movil_jefe.set(SIN_MOVIL)
+            self.combo_cuad_jefe.set(SIN_CUADRANTE)
+
+    def _cargar_jefe_elegido(self) -> None:
+        i = self.combo_jefe.current()
+        if i is None or i < 0 or i >= len(self._jefes):
+            return
+        jefe = self._jefes[i]
+        ids = [m["id"] for m in self._moviles]
+        self.combo_movil_jefe.current(ids.index(jefe["movil_id"]) + 1 if jefe.get("movil_id") in ids else 0)
+        self.combo_cuad_jefe.set(jefe.get("cuadrante") or SIN_CUADRANTE)
+
+    def _guardar_jefe(self) -> None:
+        i = self.combo_jefe.current()
+        if i is None or i < 0 or i >= len(self._jefes):
+            messagebox.showwarning("Atención", "Elija un jefe de turno (cargo «Jefe de turno»).")
+            return
+        j = self.combo_movil_jefe.current()
+        movil_id = self._moviles[j - 1]["id"] if j and j > 0 else None
+        destino = None if self.combo_cuad_jefe.current() == 0 else self.combo_cuad_jefe.get()
+        try:
+            self.servicio.asignar_jefe_turno(self._jefes[i]["id"], movil_id, destino)
+        except ValueError as err:
+            messagebox.showerror("Error", str(err))
+            return
+        self._refrescar_vistas()
+        messagebox.showinfo("Jefe de turno", "Asignación guardada.")
 
     def _ids_seleccion_mod(self):
         ids = [int(i) for i in self.tabla_mod.selection()]
@@ -1684,7 +2249,7 @@ class AplicacionTurnosGUI:
         dlg.grab_set()
 
         tk.Label(
-            dlg, text=f"Malla para: {etiqueta}", bg=MORADO, fg=BLANCO,
+            dlg, text=f"Malla para: {etiqueta} · {self.servicio.etiqueta_periodo()}", bg=MORADO, fg=BLANCO,
             font=("Segoe UI", 11, "bold"), padx=16, pady=10, anchor="w",
         ).pack(fill=tk.X)
         tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
@@ -1804,7 +2369,11 @@ class AplicacionTurnosGUI:
             dlg.destroy()
             self._mostrar_malla_guardada()
             self._refrescar_vistas()
-            messagebox.showinfo("Asignado", "Malla mensual asignada y guardada correctamente.")
+            messagebox.showinfo(
+                "Asignado",
+                f"Malla de {self.servicio.etiqueta_periodo()} asignada y guardada correctamente."
+                + self._texto_empalme(),
+            )
 
         btn_asignar.config(command=asignar)
         cuerpo.columnconfigure(1, weight=1)
@@ -1827,7 +2396,7 @@ class AplicacionTurnosGUI:
         dlg.grab_set()
 
         tk.Label(
-            dlg, text="Planificación mensual del equipo · cobertura 24/7", bg=MORADO, fg=BLANCO,
+            dlg, text=f"Planificación mensual del equipo · cobertura 24/7 · {self.servicio.etiqueta_periodo()}", bg=MORADO, fg=BLANCO,
             font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
         ).pack(fill=tk.X)
         tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
@@ -1993,7 +2562,7 @@ class AplicacionTurnosGUI:
             tk.Label(interior, text="", bg=BLANCO, width=30).grid(row=0, column=0, rowspan=2)
             for sem in range(4):
                 tk.Label(
-                    interior, text=f"Semana {sem + 1}", bg=MORADO_CLARO, fg=MORADO,
+                    interior, text=f"Ciclo · sem. {sem + 1}", bg=MORADO_CLARO, fg=MORADO,
                     font=("Segoe UI", 8, "bold"),
                 ).grid(row=0, column=1 + sem * 7, columnspan=7, sticky="ew", padx=1)
                 for d in range(7):
@@ -2072,15 +2641,42 @@ class AplicacionTurnosGUI:
                 requerimientos = {
                     rol: (req_vars[rol][0].get(), req_vars[rol][1].get()) for rol in roles
                 }
-                estado["opciones"] = self.servicio.generar_opciones_equipo(personas, requerimientos)
             except tk.TclError:
                 messagebox.showerror("Error", "La dotación debe ser un número entero.", parent=dlg)
                 return
-            except ValueError as err:
-                messagebox.showerror("Error", str(err), parent=dlg)
+            if estado.get("calculando"):
                 return
-            mostrar_opciones()
-            nb.select(tab2)
+            # el cálculo (puede tardar 1-3 s con 50 personas) corre aparte para no congelar la ventana
+            estado["calculando"] = True
+            titulo = dlg.title()
+            dlg.title("Calculando opciones…")
+            dlg.configure(cursor="watch")
+            resultado = {}
+
+            def trabajo():
+                try:
+                    resultado["ok"] = self.servicio.generar_opciones_equipo(personas, requerimientos)
+                except Exception as err:  # se informa en la ventana, no en el hilo
+                    resultado["error"] = err
+
+            hilo = threading.Thread(target=trabajo, daemon=True)
+            hilo.start()
+
+            def esperar():
+                if hilo.is_alive():
+                    dlg.after(80, esperar)
+                    return
+                estado["calculando"] = False
+                dlg.title(titulo)
+                dlg.configure(cursor="")
+                if "error" in resultado:
+                    messagebox.showerror("Error", str(resultado["error"]), parent=dlg)
+                    return
+                estado["opciones"] = resultado["ok"]
+                mostrar_opciones()
+                nb.select(tab2)
+
+            esperar()
 
         def asignar_plan():
             if not estado["opciones"]:
@@ -2113,7 +2709,8 @@ class AplicacionTurnosGUI:
             self._refrescar_vistas()
             messagebox.showinfo(
                 "Plan asignado",
-                f"Se asignó la malla mensual a {len(op['personas'])} integrantes."
+                f"Se asignó la malla de {self.servicio.etiqueta_periodo()} a {len(op['personas'])} integrantes."
+                + self._texto_empalme()
                 + ("\n\n⚠ Horario sin cubrir las 24 h:\n" + "\n".join(avisos)
                    + "\nSuba la dotación de día en el planificador o marque los 3 horarios." if avisos
                    else "\n\n✔ Las 24 horas del día quedan cubiertas."),

@@ -6,23 +6,30 @@ from capa_datos import RepositorioTurnos
 from capa_ley_opciones import ServicioTurnos
 
 
-def imprimir_tabla_semanal(nombre_completo: str, malla: list[dict], modalidades: list[str] | None = None) -> None:
+def imprimir_calendario(nombre_completo: str, malla: list[dict], modalidades: list[str] | None = None) -> None:
+    """Imprime la malla como calendario real (con las fechas de cada día)."""
+    from datetime import date
+
+    import calendario as cal
+
+    por_fecha = {date.fromisoformat(f["fecha"]): f for f in malla}
+    primero = min(por_fecha)
+    anio, mes = primero.year, primero.month
+    info = malla[0]
     print(f"\n{'=' * 75}")
-    print(f"MALLA MENSUAL 4x3 - {nombre_completo.upper()}")
-    print(f"Grupo: Turno {malla[0]['grupo_turno']} | Jornada: {malla[0]['jornada']} "
-          f"| Horario: {malla[0]['horario']} | {malla[0]['cuadrante'] or 'Sin cuadrante'}"
+    print(f"MALLA {cal.etiqueta_mes(anio, mes).upper()} - {nombre_completo.upper()}")
+    print(f"Grupo: Turno {info['grupo_turno']} | Jornada: {info['jornada']} "
+          f"| Horario: {info['horario']} | {info['cuadrante'] or 'Sin cuadrante'}"
           + (f" | {' + '.join(modalidades)}" if modalidades else ""))
     print(f"{'=' * 75}")
-    print(f"{'Semana':<10} {'Lun':<6} {'Mar':<6} {'Mié':<6} {'Jue':<6} {'Vie':<6} {'Sáb':<6} {'Dom':<6}")
+    print(f"{'Semana':<12}" + "".join(f"{d[:3]:<7}" for d in cal.NOMBRES_DIA))
     print("-" * 75)
-
-    semanas = {1: [], 2: [], 3: [], 4: []}
-    for fila in malla:
-        semanas[fila["semana_mes"]].append(fila["estado"])
-
-    for num_sem, estados in semanas.items():
-        fila_str = f"Semana {num_sem:<3} " + "".join(f"{est:<6}" for est in estados)
-        print(fila_str)
+    for semana in cal.semanas_del_mes(anio, mes):
+        celdas = []
+        for d in semana:
+            f = por_fecha.get(d)
+            celdas.append(f"{d.day:>2}:{f['estado']:<4}" if f and d.month == mes else f"{'':<7}")
+        print(f"{semana[0].day:>2}/{semana[0].month:<2} al {semana[-1].day:>2} " + "".join(celdas))
     print("=" * 75)
 
 
@@ -46,7 +53,7 @@ def demo_individual(servicio, repo):
     malla = repo.obtener_malla_personal(guardia_id)
     servicio.editar_estado_dia(guardia_id, malla[0]["id"], "HE")
 
-    imprimir_tabla_semanal(
+    imprimir_calendario(
         "Luis (Patrullero)", repo.obtener_malla_personal(guardia_id),
         servicio.obtener_modalidades_persona(guardia_id),
     )
@@ -80,7 +87,7 @@ def demo_equipo(servicio, repo):
         c: d["total"] for c, d in servicio.resumen_cuadrantes()["cuadrantes"].items()
     })
     pid, nombre = personas[0][0], personas[0][1]
-    imprimir_tabla_semanal(nombre, repo.obtener_malla_personal(pid), servicio.obtener_modalidades_persona(pid))
+    imprimir_calendario(nombre, repo.obtener_malla_personal(pid), servicio.obtener_modalidades_persona(pid))
 
 
 def main():

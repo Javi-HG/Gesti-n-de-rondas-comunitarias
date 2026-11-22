@@ -1,6 +1,9 @@
 """Capa de persistencia: concentra todo el acceso SQL y transacciones."""
 
 import sqlite3
+from datetime import date, timedelta
+
+from constantes_reglas import DIAS_SEMANA
 
 
 class RepositorioTurnos:
@@ -21,7 +24,8 @@ class RepositorioTurnos:
                     rol TEXT NOT NULL,
                     grupo_turno TEXT,
                     jornada TEXT,
-                    cuadrante TEXT
+                    cuadrante TEXT,
+                    movil_id INTEGER
                 )
                 """
             )
@@ -37,6 +41,8 @@ class RepositorioTurnos:
                     dia_semana TEXT NOT NULL,
                     semana_mes INTEGER NOT NULL,
                     estado TEXT NOT NULL,
+                    fecha TEXT,
+                    estado_previo TEXT,
                     FOREIGN KEY (personal_id) REFERENCES personal(id)
                 )
                 """
@@ -77,6 +83,20 @@ class RepositorioTurnos:
                     "SELECT cuadrante FROM asignaciones_turno "
                     "WHERE personal_id = personal.id LIMIT 1), '')"
                 )
+            if "movil_id" not in self._columnas("personal"):
+                # móvil (patrullero con modalidad Móvil) al que va asignado un jefe de turno
+                self.conexion.execute("ALTER TABLE personal ADD COLUMN movil_id INTEGER")
+            if "fecha" not in self._columnas("asignaciones_turno"):
+                self.conexion.execute("ALTER TABLE asignaciones_turno ADD COLUMN fecha TEXT")
+            if "estado_previo" not in self._columnas("asignaciones_turno"):
+                # estado que tenía el día antes de una vacación / licencia (para poder quitarla)
+                self.conexion.execute("ALTER TABLE asignaciones_turno ADD COLUMN estado_previo TEXT")
+            self._fechar_mallas_antiguas()
+            self.conexion.execute("DROP INDEX IF EXISTS idx_asignaciones_persona")
+            self.conexion.execute(
+                "CREATE INDEX IF NOT EXISTS idx_asignaciones_persona_fecha "
+                "ON asignaciones_turno (personal_id, fecha)"
+            )
             # el cargo GUARDIA pasó a llamarse PATRULLERO
             self.conexion.execute("UPDATE personal SET rol = 'PATRULLERO' WHERE rol = 'GUARDIA'")
             # modalidad única (tabla antigua) -> modalidades múltiples
@@ -88,6 +108,25 @@ class RepositorioTurnos:
                 self.conexion.execute("DROP TABLE modalidad_personal")
         # Las bases antiguas conservan la columna apellido (NOT NULL): se rellena con vacío.
         self._tiene_apellido = "apellido" in self._columnas("personal")
+
+    def _fechar_mallas_antiguas(self) -> None:
+        """Las mallas de versiones anteriores eran 4 semanas sin fecha: se ubican en el mes actual
+        (la primera semana parte el lunes en o antes del día 1) para no perderlas."""
+        antiguas = self.conexion.execute(
+            "SELECT id, semana_mes, dia_semana FROM asignaciones_turno WHERE fecha IS NULL"
+        ).fetchall()
+        if not antiguas:
+            return
+        hoy = date.today()
+        primero = date(hoy.year, hoy.month, 1)
+        lunes = primero - timedelta(days=primero.weekday())
+        self.conexion.executemany(
+            "UPDATE asignaciones_turno SET fecha = ? WHERE id = ?",
+            [
+                ((lunes + timedelta(days=(sem - 1) * 7 + DIAS_SEMANA.index(dia))).isoformat(), fila_id)
+                for fila_id, sem, dia in antiguas
+            ],
+        )
 
     # ------------------------------------------------------------------ personal
     def registrar_personal(
@@ -114,6 +153,27 @@ class RepositorioTurnos:
                 "UPDATE personal SET nombre = ? WHERE id = ?", (nombre, personal_id)
             )
             return cursor.rowcount > 0
+
+    def actualizar_persona(
+        self, personal_id: int, nombre: str, rol: str, grupo_turno: str, jornada: str,
+        cuadrante: str | None, movil_id: int | None, modalidades: list[str],
+    ) -> None:
+        """Actualiza TODOS los datos de la persona en una sola transacción."""
+        with self.conexion:
+            self.conexion.execute(
+                "UPDATE personal SET nombre = ?, rol = ?, grupo_turno = ?, jornada = ?, "
+                "cuadrante = ?, movil_id = ? WHERE id = ?",
+                (nombre, rol, grupo_turno, jornada, cuadrante, movil_id, personal_id),
+            )
+            self.conexion.execute(
+                "UPDATE asignaciones_turno SET cuadrante = ? WHERE personal_id = ?",
+                (cuadrante or "", personal_id),
+            )
+            self.conexion.execute("DELETE FROM modalidades_persona WHERE personal_id = ?", (personal_id,))
+            self.conexion.executemany(
+                "INSERT OR IGNORE INTO modalidades_persona (personal_id, modalidad) VALUES (?, ?)",
+                [(personal_id, m) for m in modalidades],
+            )
 
     def registrar_varios(self, filas: list[tuple]) -> list[int]:
         """Carga masiva en UNA transacción: si algo falla no se guarda a nadie.
@@ -143,6 +203,7 @@ class RepositorioTurnos:
         with self.conexion:
             self.conexion.execute("DELETE FROM asignaciones_turno WHERE personal_id = ?", (personal_id,))
             self.conexion.execute("DELETE FROM modalidades_persona WHERE personal_id = ?", (personal_id,))
+            self.conexion.execute("UPDATE personal SET movil_id = NULL WHERE movil_id = ?", (personal_id,))
             self.conexion.execute("DELETE FROM personal WHERE id = ?", (personal_id,))
 
     def actualizar_perfil_turno(self, personal_id: int, grupo_turno: str, jornada: str) -> None:
@@ -155,7 +216,7 @@ class RepositorioTurnos:
     def _select_personal(self) -> str:
         apellido = "apellido" if self._tiene_apellido else "'' AS apellido"
         return (
-            f"SELECT id, nombre, {apellido}, rol, grupo_turno, jornada, cuadrante FROM personal"
+            f"SELECT id, nombre, {apellido}, rol, grupo_turno, jornada, cuadrante, movil_id FROM personal"
         )
 
     def listar_personal(self) -> list[dict]:
@@ -169,6 +230,12 @@ class RepositorioTurnos:
         if fila is None:
             return None
         return dict(zip([col[0] for col in cursor.description], fila))
+
+    def actualizar_movil(self, personal_id: int, movil_id: int | None) -> None:
+        with self.conexion:
+            self.conexion.execute(
+                "UPDATE personal SET movil_id = ? WHERE id = ?", (movil_id, personal_id)
+            )
 
     # ---------------------------------------------------------------- cuadrantes
     def actualizar_cuadrante(self, personal_ids: list[int], cuadrante: str | None) -> None:
@@ -185,36 +252,71 @@ class RepositorioTurnos:
             )
 
     # -------------------------------------------------------------------- mallas
-    def guardar_malla_completa(self, registros: list[tuple]) -> None:
-        """Guarda en una sola transacción atómica toda una propuesta de malla."""
-        with self.conexion:
-            self._insertar_registros(registros)
+    def reemplazar_mallas(
+        self, personal_ids: list[int], registros: list[tuple], desde: date, hasta: date
+    ) -> None:
+        """Borra las mallas de las personas indicadas entre `desde` y `hasta` (inclusive) y guarda
+        las nuevas, todo en una única transacción (si algo falla no se pierde lo anterior).
 
-    def reemplazar_mallas(self, personal_ids: list[int], registros: list[tuple]) -> None:
-        """Borra las mallas previas de las personas indicadas y guarda las nuevas,
-        todo en una única transacción (si algo falla no se pierde la malla anterior)."""
+        registros: (personal_id, grupo_turno, jornada, horario, cuadrante, fecha(date), estado)."""
         with self.conexion:
+            # las vacaciones y licencias ya cargadas son hechos reales: se conservan al replanificar
+            ausencias = [
+                fila for pid in personal_ids for fila in self.conexion.execute(
+                    "SELECT personal_id, fecha, estado FROM asignaciones_turno "
+                    "WHERE personal_id = ? AND fecha BETWEEN ? AND ? AND estado IN ('VAC', 'LM')",
+                    (pid, desde.isoformat(), hasta.isoformat()),
+                ).fetchall()
+            ]
             self.conexion.executemany(
-                "DELETE FROM asignaciones_turno WHERE personal_id = ?",
-                [(pid,) for pid in personal_ids],
+                "DELETE FROM asignaciones_turno WHERE personal_id = ? AND fecha BETWEEN ? AND ?",
+                [(pid, desde.isoformat(), hasta.isoformat()) for pid in personal_ids],
             )
-            self._insertar_registros(registros)
+            self.conexion.executemany(
+                """
+                INSERT INTO asignaciones_turno (
+                    personal_id, grupo_turno, jornada, horario,
+                    cuadrante, dia_semana, semana_mes, estado, fecha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (pid, grupo, jornada, horario, cuadrante, DIAS_SEMANA[f.weekday()],
+                     (f.day - 1) // 7 + 1, estado, f.isoformat())
+                    for pid, grupo, jornada, horario, cuadrante, f, estado in registros
+                ],
+            )
+            self.conexion.executemany(
+                "UPDATE asignaciones_turno SET estado_previo = estado, estado = ? "
+                "WHERE personal_id = ? AND fecha = ?",
+                [(est, pid, fecha) for pid, fecha, est in ausencias],
+            )
 
-    def _insertar_registros(self, registros: list[tuple]) -> None:
-        self.conexion.executemany(
-            """
-            INSERT INTO asignaciones_turno (
-                personal_id, grupo_turno, jornada, horario,
-                cuadrante, dia_semana, semana_mes, estado
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            registros,
-        )
+    def aplicar_ausencia(self, personal_id: int, desde: date, hasta: date, estado: str) -> int:
+        """Marca vacaciones / licencia médica en los días con malla entre dos fechas (inclusive).
+        Guarda lo que había para poder quitarla después. Devuelve los días modificados."""
+        with self.conexion:
+            self.conexion.execute(
+                "UPDATE asignaciones_turno SET estado_previo = CASE WHEN estado IN ('VAC', 'LM') "
+                "THEN estado_previo ELSE estado END, estado = ? "
+                "WHERE personal_id = ? AND fecha BETWEEN ? AND ?",
+                (estado, personal_id, desde.isoformat(), hasta.isoformat()),
+            )
+            return self.conexion.execute("SELECT changes()").fetchone()[0]
+
+    def quitar_ausencia(self, personal_id: int, desde: date, hasta: date) -> int:
+        """Devuelve cada día con vacaciones / licencia a lo que tenía antes (libre si no se sabe)."""
+        with self.conexion:
+            self.conexion.execute(
+                "UPDATE asignaciones_turno SET estado = COALESCE(estado_previo, 'L'), estado_previo = NULL "
+                "WHERE personal_id = ? AND fecha BETWEEN ? AND ? AND estado IN ('VAC', 'LM')",
+                (personal_id, desde.isoformat(), hasta.isoformat()),
+            )
+            return self.conexion.execute("SELECT changes()").fetchone()[0]
 
     def actualizar_celda_turno(self, asignacion_id: int, nuevo_estado: str) -> bool:
         with self.conexion:
             cursor = self.conexion.execute(
-                "UPDATE asignaciones_turno SET estado = ? WHERE id = ?",
+                "UPDATE asignaciones_turno SET estado = ?, estado_previo = NULL WHERE id = ?",
                 (nuevo_estado, asignacion_id),
             )
             return cursor.rowcount > 0
@@ -237,22 +339,41 @@ class RepositorioTurnos:
                 "UPDATE asignaciones_turno SET estado = ? WHERE id = ?", (fila_a[0], asignacion_b)
             )
 
-    def obtener_malla_personal(self, personal_id: int) -> list[dict]:
-        """Malla del mes; el cuadrante devuelto es siempre el propio de la persona."""
-        cursor = self.conexion.execute(
-            """
-            SELECT a.id, a.grupo_turno, a.jornada, a.horario,
-                   COALESCE(p.cuadrante, '') AS cuadrante,
-                   a.dia_semana, a.semana_mes, a.estado
-            FROM asignaciones_turno a
-            JOIN personal p ON p.id = a.personal_id
-            WHERE a.personal_id = ?
-            ORDER BY a.semana_mes, a.id
-            """,
-            (personal_id,),
+    _COLUMNAS_MALLA = (
+        "a.id, a.personal_id, a.grupo_turno, a.jornada, a.horario, COALESCE(p.cuadrante, '') AS cuadrante, "
+        "a.dia_semana, a.semana_mes, a.estado, a.fecha"
+    )
+
+    def obtener_malla_personal(
+        self, personal_id: int, desde: date | None = None, hasta: date | None = None
+    ) -> list[dict]:
+        """Malla de una persona ordenada por fecha (todo, o solo entre `desde` y `hasta`)."""
+        sql = (
+            f"SELECT {self._COLUMNAS_MALLA} FROM asignaciones_turno a "
+            "JOIN personal p ON p.id = a.personal_id WHERE a.personal_id = ?"
         )
+        params: list = [personal_id]
+        if desde is not None and hasta is not None:
+            sql += " AND a.fecha BETWEEN ? AND ?"
+            params += [desde.isoformat(), hasta.isoformat()]
+        cursor = self.conexion.execute(sql + " ORDER BY a.fecha, a.id", params)
         columnas = [col[0] for col in cursor.description]
         return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+
+    def obtener_mallas_rango(self, desde: date, hasta: date) -> dict[int, list[dict]]:
+        """{personal_id: filas} de todo el equipo entre dos fechas, en UNA sola consulta."""
+        cursor = self.conexion.execute(
+            f"SELECT {self._COLUMNAS_MALLA} FROM asignaciones_turno a "
+            "JOIN personal p ON p.id = a.personal_id WHERE a.fecha BETWEEN ? AND ? "
+            "ORDER BY a.personal_id, a.fecha, a.id",
+            (desde.isoformat(), hasta.isoformat()),
+        )
+        columnas = [col[0] for col in cursor.description]
+        res: dict[int, list[dict]] = {}
+        for fila in cursor.fetchall():
+            d = dict(zip(columnas, fila))
+            res.setdefault(d["personal_id"], []).append(d)
+        return res
 
     # --------------------------------------------------------------- modalidades
     def obtener_modalidades(self) -> dict[int, list[str]]:
