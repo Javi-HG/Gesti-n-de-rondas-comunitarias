@@ -34,6 +34,7 @@ ETIQUETAS_ROL = {
 def etiqueta_rol(rol: str) -> str:
     return ETIQUETAS_ROL.get(rol, rol.replace("_", " ").capitalize())
 
+
 # Solo los patrulleros tienen modalidad (Móvil, Moto, Infantería, Bicicleta)
 ROL_PATRULLERO = "PATRULLERO"
 

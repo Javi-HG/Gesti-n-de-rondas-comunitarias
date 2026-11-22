@@ -8,7 +8,7 @@ import sqlite3
 from datetime import date
 import tkinter as tk
 import threading
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import calendario as cal
 from capa_datos import RepositorioTurnos
@@ -17,7 +17,6 @@ from constantes_reglas import (
     CUADRANTES,
     DESTINOS_SERVICIO,
     FERIA,
-    ESTADOS_CELDA,
     ESTADOS_DIA_EDITABLES,
     MIN_PERSONAS_POR_DIA,
     MIN_POR_TURNO_MODALIDAD,
@@ -569,7 +568,8 @@ class AplicacionTurnosGUI:
 
         tk.Label(
             c_malla,
-            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  Gris = libre  ·  Número = fecha, luego el código y bajo él las horas  ·  Días tenues = mes vecino",
+            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  Gris = libre  ·  "
+                 "Número = fecha, luego el código y bajo él las horas  ·  Días tenues = mes vecino",
             bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), anchor="w",
         ).pack(fill=tk.X, pady=(8, 0))
 
@@ -628,7 +628,9 @@ class AplicacionTurnosGUI:
         tk.Label(
             aus, text="Ausencias por fechas:", bg=BLANCO, fg=GRIS, font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=(0, 10))
-        for modo, texto in (("VAC", "VAC  Vacaciones…"), ("LM", "LM  Licencia médica…"), ("QUITAR", "Quitar ausencia…")):
+        for modo, texto in (
+            ("VAC", "VAC  Vacaciones…"), ("LM", "LM  Licencia médica…"), ("QUITAR", "Quitar ausencia…"),
+        ):
             bg, fg = _colores(modo) if modo != "QUITAR" else ("#E9E9EF", "#333333")
             BotonRedondo(
                 aus, texto, lambda m=modo: self._dialogo_ausencia(m), bg=bg,
@@ -712,7 +714,8 @@ class AplicacionTurnosGUI:
             self.personal_etiquetas.append(f"{self._nombre_completo(p)} ({etiqueta_rol(p['rol'])})")
             self.lista_personal.insert(tk.END, self._linea_persona(p))
         self.lbl_conteo.config(
-            text=f"{len(visibles)} de {len(todos)} personas" if len(visibles) != len(todos) else f"{len(todos)} personas"
+            text=(f"{len(visibles)} de {len(todos)} personas" if len(visibles) != len(todos)
+                  else f"{len(todos)} personas")
         )
         if self.personal_ids:
             if seleccionar_ultimo:
@@ -818,7 +821,9 @@ class AplicacionTurnosGUI:
                 continue
             sem = semanas[i - 1]
             etq.grid()
-            etq.config(text=f"{sem[0].day} {cal.NOMBRES_MES_CORTO[sem[0].month - 1]}\n– {sem[6].day} {cal.NOMBRES_MES_CORTO[sem[6].month - 1]}")
+            mes_ini = cal.NOMBRES_MES_CORTO[sem[0].month - 1]
+            mes_fin = cal.NOMBRES_MES_CORTO[sem[6].month - 1]
+            etq.config(text=f"{sem[0].day} {mes_ini}\n– {sem[6].day} {mes_fin}")
             for dia, d, lbl in zip(DIAS, sem, celdas):
                 lbl.grid()
                 self.fecha_celda[(i, dia)] = d
@@ -1022,7 +1027,8 @@ class AplicacionTurnosGUI:
             self.celda_sel = None
             self._mostrar_malla_guardada()
             self._refrescar_vistas()
-            rango = f"{desde.day} {cal.NOMBRES_MES_CORTO[desde.month - 1]} – {hasta.day} {cal.NOMBRES_MES_CORTO[hasta.month - 1]} {hasta.year}"
+            rango = (f"{desde.day} {cal.NOMBRES_MES_CORTO[desde.month - 1]} – "
+                     f"{hasta.day} {cal.NOMBRES_MES_CORTO[hasta.month - 1]} {hasta.year}")
             if modo == "QUITAR":
                 messagebox.showinfo("Ausencia quitada", f"{n} día(s) vuelven a su estado anterior ({rango}).")
                 return
@@ -1107,7 +1113,10 @@ class AplicacionTurnosGUI:
         etiqueta("Va en el móvil de (solo jefe de turno)", 10)
         moviles = [m for m in self.servicio.moviles_disponibles() if m["id"] != personal_id]
         c_movil = ttk.Combobox(
-            cu, values=[SIN_MOVIL] + [f"{self._nombre_completo(m)} ({m.get('cuadrante') or 'sin cuadrante'})" for m in moviles],
+            cu,
+            values=[SIN_MOVIL] + [
+                f"{self._nombre_completo(m)} ({m.get('cuadrante') or 'sin cuadrante'})" for m in moviles
+            ],
             state="readonly",
         )
         ids_mov = [m["id"] for m in moviles]
@@ -1155,8 +1164,10 @@ class AplicacionTurnosGUI:
         fila.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         fila.columnconfigure(0, weight=1)
         fila.columnconfigure(1, weight=1)
-        self._btn(fila, text="Guardar cambios", style="Verde.TButton", command=guardar).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self._btn(fila, text="Cancelar", style="Morado.TButton", command=dlg.destroy).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._btn(fila, text="Guardar cambios", style="Verde.TButton", command=guardar).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4))
+        self._btn(fila, text="Cancelar", style="Morado.TButton", command=dlg.destroy).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0))
         e_nombre.focus_set()
 
     def _abrir_carga_masiva(self) -> None:
@@ -1205,7 +1216,8 @@ class AplicacionTurnosGUI:
             ("Turno", GRUPOS_TURNO, 5),
             ("Jornada", ("Diurno", "Nocturno"), 10),
         )):
-            tk.Label(defecto, text=titulo, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9)).grid(row=0, column=k, sticky="w", padx=(0 if k == 0 else 10, 0))
+            tk.Label(defecto, text=titulo, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9)).grid(
+                row=0, column=k, sticky="w", padx=(0 if k == 0 else 10, 0))
             cb = ttk.Combobox(defecto, values=valores, state="readonly", width=ancho)
             cb.current(0)
             cb.grid(row=1, column=k, sticky="w", padx=(0 if k == 0 else 10, 0))
@@ -1465,7 +1477,10 @@ class AplicacionTurnosGUI:
             barra, text="Malla mensual de todo el equipo", bg=FONDO, fg=MORADO,
             font=("Segoe UI", 13, "bold"),
         ).pack(side=tk.LEFT)
-        self._btn(barra, text="Actualizar", style="Morado.TButton", command=lambda: self._refrescar_vistas(forzar=True)).pack(
+        self._btn(
+            barra, text="Actualizar", style="Morado.TButton",
+            command=lambda: self._refrescar_vistas(forzar=True),
+        ).pack(
             side=tk.RIGHT
         )
         self._btn(
@@ -1484,7 +1499,8 @@ class AplicacionTurnosGUI:
 
         tk.Label(
             tab,
-            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  · = libre  ·  V = vacaciones  ·  LM = licencia médica  ·  "
+            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  · = libre  ·  V = vacaciones  ·  "
+                 "LM = licencia médica  ·  "
                  "HE / HN = horas extras  ·  Arrastre un día a otro casillero de la misma fila para moverlo",
             bg=FONDO, fg=GRIS, font=("Segoe UI", 9), anchor="w", justify="left", wraplength=900,
         ).pack(fill=tk.X, pady=(0, 6))
@@ -1551,7 +1567,9 @@ class AplicacionTurnosGUI:
             w.destroy()
         resumen = self.servicio.resumen_cuadrantes()
         tk.Label(
-            marco, text="Cuadrantes y Feria · cada cuadrante necesita al menos un Móvil · las motos no llevan cuadrante · arrastre un nombre para cambiarlo",
+            marco,
+            text="Cuadrantes y Feria · cada cuadrante necesita al menos un Móvil · las motos no llevan "
+                 "cuadrante · arrastre un nombre para cambiarlo",
             bg=FONDO, fg=MORADO, font=("Segoe UI", 10, "bold"), anchor="w",
         ).grid(row=0, column=0, columnspan=len(DESTINOS_SERVICIO), sticky="w", pady=(0, 4))
         for i, nombre in enumerate(DESTINOS_SERVICIO):
@@ -1610,9 +1628,11 @@ class AplicacionTurnosGUI:
         marco_sin.grid(row=2, column=0, columnspan=len(DESTINOS_SERVICIO), sticky="ew", padx=3, pady=(4, 0))
         tk.Label(
             marco_sin,
-            text=f"Sin cuadrante ({len(sin)}): " + (", ".join(sin[:8]) + ("…" if len(sin) > 8 else "") if sin else "ninguno")
+            text=f"Sin cuadrante ({len(sin)}): "
+            + (", ".join(sin[:8]) + ("…" if len(sin) > 8 else "") if sin else "ninguno")
             + f"   ·   Motos, sin cuadrante por norma ({len(resumen['motos'])}): "
-            + (", ".join(resumen["motos"][:6]) + ("…" if len(resumen["motos"]) > 6 else "") if resumen["motos"] else "ninguna"),
+            + (", ".join(resumen["motos"][:6]) + ("…" if len(resumen["motos"]) > 6 else "")
+               if resumen["motos"] else "ninguna"),
             bg=BLANCO, fg=GRIS, font=("Segoe UI", 8), anchor="w",
         ).pack(fill=tk.X)
         destino = {"tipo": "cuadrante", "cuadrante": None, "marco": marco_sin}
@@ -1816,7 +1836,8 @@ class AplicacionTurnosGUI:
             for g in self.servicio.cobertura_horaria()
             if g["es_cargo"] or any(g["horas"])  # un Móvil sin ninguna malla se informa en las tarjetas
         ]
-        self._canvas_resumen(interior, fila, "Horas cubiertas por día (24 = día completo)", dias, filas_h, base + n_dias)
+        self._canvas_resumen(
+            interior, fila, "Horas cubiertas por día (24 = día completo)", dias, filas_h, base + n_dias)
         self._firma_equipo = firma
 
     def _canvas_resumen(self, interior, fila: int, titulo: str, dias, filas, columnas: int) -> int:
@@ -1866,7 +1887,8 @@ class AplicacionTurnosGUI:
         dlg.transient(self.root)
         dlg.grab_set()
         tk.Label(
-            dlg, text=f"Turno A y turno B: cada turno trabaja junto · {self.servicio.etiqueta_periodo()}", bg=MORADO, fg=BLANCO,
+            dlg, text=f"Turno A y turno B: cada turno trabaja junto · {self.servicio.etiqueta_periodo()}",
+            bg=MORADO, fg=BLANCO,
             font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
         ).pack(fill=tk.X)
         tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
@@ -1989,7 +2011,8 @@ class AplicacionTurnosGUI:
             op = estado["opciones"][var_op.get()]
             if not messagebox.askyesno(
                 "Confirmar",
-                f"Se reemplazará la malla de {self.servicio.etiqueta_periodo()} de todos los integrantes con turno y jornada "
+                f"Se reemplazará la malla de {self.servicio.etiqueta_periodo()} de todos los integrantes "
+                "con turno y jornada "
                 f"(turno A: {t['A']['total']}, turno B: {t['B']['total']}).\n¿Continuar?",
                 parent=dlg,
             ):
@@ -2292,7 +2315,8 @@ class AplicacionTurnosGUI:
 
         perfil = next((p for p in self.servicio.listar_personal() if p["id"] == personal_id), {})
         combo_grupo = ttk.Combobox(cuerpo, values=GRUPOS_TURNO, state="readonly", width=26)
-        combo_grupo.current(GRUPOS_TURNO.index(perfil["grupo_turno"]) if perfil.get("grupo_turno") in GRUPOS_TURNO else 0)
+        combo_grupo.current(
+            GRUPOS_TURNO.index(perfil["grupo_turno"]) if perfil.get("grupo_turno") in GRUPOS_TURNO else 0)
         fila(1, "Turno (A / B)", combo_grupo)
 
         combo_jornada = ttk.Combobox(
@@ -2420,7 +2444,8 @@ class AplicacionTurnosGUI:
         dlg.grab_set()
 
         tk.Label(
-            dlg, text=f"Planificación mensual del equipo · cobertura 24/7 · {self.servicio.etiqueta_periodo()}", bg=MORADO, fg=BLANCO,
+            dlg, text=f"Planificación mensual del equipo · cobertura 24/7 · {self.servicio.etiqueta_periodo()}",
+            bg=MORADO, fg=BLANCO,
             font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
         ).pack(fill=tk.X)
         tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)

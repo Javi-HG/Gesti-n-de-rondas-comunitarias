@@ -162,8 +162,12 @@ class ServicioTurnos:
             movil_id = None
         elif movil_id is not None:
             movil = self.repositorio.obtener_persona(movil_id)
-            mods_movil = modalidades if movil_id == personal_id else self.repositorio.obtener_modalidades().get(movil_id, [])
-            if movil is None or movil_id == personal_id or movil["rol"] != ROL_PATRULLERO or "Móvil" not in mods_movil:
+            mods_movil = (
+                modalidades if movil_id == personal_id
+                else self.repositorio.obtener_modalidades().get(movil_id, [])
+            )
+            if (movil is None or movil_id == personal_id or movil["rol"] != ROL_PATRULLERO
+                    or "Móvil" not in mods_movil):
                 raise ValueError("El móvil debe ser otro patrullero con modalidad Móvil.")
         self.repositorio.actualizar_persona(
             personal_id, nombre, rol, grupo_turno, jornada, cuadrante, movil_id, modalidades
@@ -345,8 +349,10 @@ class ServicioTurnos:
             "Una persona por fila. Borre las filas de ejemplo antes de cargar.",
             "Cargo: Patrullero · Radio operador · Supervisor · Jefe de turno.",
             "Turno: A o B.   Jornada: Diurno o Nocturno.",
-            "Cuadrante (opcional): Cuadrante 1 a 6 (o solo el número). Feria solo para bicicletas. Las motos no llevan cuadrante.",
-            "Modalidades (opcional, solo patrulleros): Móvil, Moto, Infantería, Bicicleta. Varias separadas por +  (ej.: Móvil + Moto).",
+            "Cuadrante (opcional): Cuadrante 1 a 6 (o solo el número). Feria solo para bicicletas. "
+            "Las motos no llevan cuadrante.",
+            "Modalidades (opcional, solo patrulleros): Móvil, Moto, Infantería, Bicicleta. "
+            "Varias separadas por +  (ej.: Móvil + Moto).",
             "Quien ya exista con el mismo nombre se omite.",
         ]
         for r, t in enumerate(lineas):
@@ -956,7 +962,8 @@ class ServicioTurnos:
                 for f in malla if f["estado"] in ("T", "HE", "HEN")
             ]
             claves = [p["rol"]]
-            if p["rol"] == ROL_PATRULLERO and "Móvil" in modalidades.get(p["id"], []) and p.get("cuadrante") in CUADRANTES:
+            es_movil = "Móvil" in modalidades.get(p["id"], [])
+            if p["rol"] == ROL_PATRULLERO and es_movil and p.get("cuadrante") in CUADRANTES:
                 claves.append(f"Móvil · {p['cuadrante']}")
             for clave in claves:
                 por_grupo.setdefault(clave, []).extend(turnos)
@@ -1077,7 +1084,11 @@ class ServicioTurnos:
                 h.celda(fila, base + n + 1, n - trabaja, "centro")
             fila += 1
         fila += 1
-        h.celda(fila, 0, "Verde = día · Morado = noche · · = libre · V = vacaciones · LM = licencia médica · HE/HEN = horas extra", "sub")
+        h.celda(
+            fila, 0,
+            "Verde = día · Morado = noche · · = libre · V = vacaciones · LM = licencia médica · HE/HEN = horas extra",
+            "sub",
+        )
         h.congelar = (5, 1)
         hojas = [h]
 
@@ -1091,7 +1102,10 @@ class ServicioTurnos:
         r = self.resumen_cuadrantes()
         h = Hoja("Cuadrantes")
         h.celda(0, 0, "Personal por cuadrante · modalidades (una persona puede usar varias)", "titulo")
-        cols = ("Destino", "Total", *MODALIDADES, "Patrull. sin modalidad", "Radio operadores", "Supervisores", "Jefes de turno", "Integrantes")
+        cols = (
+            "Destino", "Total", *MODALIDADES, "Patrull. sin modalidad",
+            "Radio operadores", "Supervisores", "Jefes de turno", "Integrantes",
+        )
         for c, t in enumerate(cols):
             h.celda(2, c, t, "enc")
             h.anchos[c] = 14 if c < len(cols) - 1 else 60

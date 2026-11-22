@@ -1,0 +1,7 @@
+# La aplicación (interfaz_gui.py, MAIN.py y el resto de los módulos) usa SOLO la biblioteca
+# estándar de Python 3.10 o superior (sqlite3, tkinter, datetime, csv, zipfile, ...).
+# No hay dependencias de terceros para ejecutarla.
+#
+# Lo siguiente es únicamente para desarrollo: pruebas y revisión de estilo.
+pytest>=7.0
+flake8>=6.0

@@ -106,7 +106,8 @@ def _styles_xml() -> str:
              '<alignment vertical="center"/>'
         xfs.append(f'<xf numFmtId="0" fontId="{mapa_f[kf]}" fillId="{mapa_r.get(fondo, 0)}" borderId="1" '
                    f'xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">{al}</xf>')
-    borde = ('<border><left style="thin"><color rgb="FFD9D2E3"/></left><right style="thin"><color rgb="FFD9D2E3"/></right>'
+    borde = ('<border><left style="thin"><color rgb="FFD9D2E3"/></left>'
+             '<right style="thin"><color rgb="FFD9D2E3"/></right>'
              '<top style="thin"><color rgb="FFD9D2E3"/></top><bottom style="thin"><color rgb="FFD9D2E3"/></bottom>'
              '<diagonal/></border>')
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -120,19 +121,24 @@ def _styles_xml() -> str:
             '</styleSheet>')
 
 
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_TIPO = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+
+
 def guardar_xlsx(ruta: str, hojas: list[Hoja]) -> None:
     n = len(hojas)
     contenido = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
                  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
                  '<Default Extension="xml" ContentType="application/xml"/>'
-                 '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-                 '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-                 + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                 f'<Override PartName="/xl/workbook.xml" ContentType="{_TIPO}.sheet.main+xml"/>'
+                 f'<Override PartName="/xl/styles.xml" ContentType="{_TIPO}.styles+xml"/>'
+                 + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+                           f'ContentType="{_TIPO}.worksheet+xml"/>'
                            for i in range(1, n + 1)) + "</Types>")
     raiz = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            f'<Relationship Id="rId1" Type="{_REL}/officeDocument" Target="xl/workbook.xml"/>'
             '</Relationships>')
     libro = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
@@ -141,9 +147,10 @@ def guardar_xlsx(ruta: str, hojas: list[Hoja]) -> None:
                        for i, h in enumerate(hojas, 1)) + "</sheets></workbook>")
     rels_libro = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                  + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+                  + "".join(f'<Relationship Id="rId{i}" Type="{_REL}/worksheet" '
+                            f'Target="worksheets/sheet{i}.xml"/>'
                             for i in range(1, n + 1))
-                  + f'<Relationship Id="rId{n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                  + f'<Relationship Id="rId{n + 1}" Type="{_REL}/styles" Target="styles.xml"/>'
                   '</Relationships>')
     with zipfile.ZipFile(ruta, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", contenido)

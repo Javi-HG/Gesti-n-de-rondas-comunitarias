@@ -79,7 +79,10 @@ def elegir_horarios(personas: list[dict], horarios: list[str], vueltas: int = 3)
                     tocadas.add(((k + desp) % DIAS_MES, hora))
         # el costo se mide sobre el día completo para ver el hueco real
         dias_tocados = {d for d, _h in tocadas}
-        huecos = sum(1 for d in dias_tocados for h in range(HORAS_DIA) if t[d][h] + (1 if (d, h) in tocadas else 0) == 0)
+        huecos = sum(
+            1 for d in dias_tocados for h in range(HORAS_DIA)
+            if t[d][h] + (1 if (d, h) in tocadas else 0) == 0
+        )
         exceso = sum((t[d][h] + (1 if (d, h) in tocadas else 0)) ** 2 for d, h in tocadas)
         return huecos, exceso
 
