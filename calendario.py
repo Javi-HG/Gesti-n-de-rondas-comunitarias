@@ -9,6 +9,7 @@ Para empalmar con otro mes se elige la «fase» (0 a 3 semanas de desplazamiento
 primer día del mes continúa lo que venía del mes anterior y el último día calza con el siguiente.
 """
 
+from functools import lru_cache
 from datetime import date, timedelta
 
 CICLO = 28
@@ -49,6 +50,7 @@ def dias_del_mes(anio: int, mes: int) -> list[date]:
     return [d + timedelta(days=k) for k in range((fin - d).days + 1)]
 
 
+@lru_cache(maxsize=256)
 def lunes_inicial(anio: int, mes: int) -> date:
     d = primer_dia(anio, mes)
     return d - timedelta(days=d.weekday())

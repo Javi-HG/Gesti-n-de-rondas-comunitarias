@@ -386,7 +386,8 @@ class AplicacionTurnosGUI:
         self.var_busqueda = tk.StringVar()
         self.entry_busqueda = ttk.Entry(busq, textvariable=self.var_busqueda)
         self.entry_busqueda.grid(row=0, column=0, sticky="ew")
-        self.var_busqueda.trace_add("write", lambda *a: self._cargar_lista_personal())
+        self._job_busqueda = None
+        self.var_busqueda.trace_add("write", lambda *a: self._buscar_diferido())
         tk.Label(busq, text="🔍", bg=BLANCO, fg=GRIS, font=("Segoe UI", 11)).grid(row=0, column=1, padx=(4, 0))
         self.filtros_lista = {}
         filtros = (
@@ -670,6 +671,15 @@ class AplicacionTurnosGUI:
             jornada=jorn.upper() if f["jornada"].current() > 0 else None,
             tipo=tipo if f["tipo"].current() > 0 else None,
         )
+
+    def _buscar_diferido(self) -> None:
+        """Espera una breve pausa al escribir para no recargar la lista con cada tecla."""
+        if self._job_busqueda:
+            try:
+                self.root.after_cancel(self._job_busqueda)
+            except (ValueError, tk.TclError):
+                pass
+        self._job_busqueda = self.root.after(180, self._cargar_lista_personal)
 
     def _limpiar_filtros(self) -> None:
         self.var_busqueda.set("")
@@ -1281,10 +1291,13 @@ class AplicacionTurnosGUI:
             self._mostrar_malla_guardada()
         self._refrescar_vistas()
 
-    def _refrescar_vistas(self) -> None:
-        """Redibuja las pestañas del equipo y de modalidad con los datos actuales."""
+    def _refrescar_vistas(self, forzar: bool = False) -> None:
+        """Redibuja las pestañas del equipo y de modalidad con los datos actuales
+        (solo si algo cambió, salvo que se fuerce con «Actualizar»)."""
         if not hasattr(self, "interior_equipo"):
             return
+        if forzar:
+            self._firma_equipo = None
         # solo se redibuja la pestaña a la vista; la otra se marca y se pinta al abrirla
         self._sucio = {1, 2}
         self._pintar_pestana_visible()
@@ -1452,7 +1465,7 @@ class AplicacionTurnosGUI:
             barra, text="Malla mensual de todo el equipo", bg=FONDO, fg=MORADO,
             font=("Segoe UI", 13, "bold"),
         ).pack(side=tk.LEFT)
-        self._btn(barra, text="Actualizar", style="Morado.TButton", command=self._refrescar_vistas).pack(
+        self._btn(barra, text="Actualizar", style="Morado.TButton", command=lambda: self._refrescar_vistas(forzar=True)).pack(
             side=tk.RIGHT
         )
         self._btn(
@@ -1471,7 +1484,7 @@ class AplicacionTurnosGUI:
 
         tk.Label(
             tab,
-            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  · = libre  ·  V = vacaciones  ·  "
+            text="Verde = turno diurno  ·  Morado = turno nocturno  ·  · = libre  ·  V = vacaciones  ·  LM = licencia médica  ·  "
                  "HE / HN = horas extras  ·  Arrastre un día a otro casillero de la misma fila para moverlo",
             bg=FONDO, fg=GRIS, font=("Segoe UI", 9), anchor="w", justify="left", wraplength=900,
         ).pack(fill=tk.X, pady=(0, 6))
@@ -1614,6 +1627,25 @@ class AplicacionTurnosGUI:
             yield from cls._descendientes(hijo)
 
     def _dibujar_malla_equipo(self) -> None:
+        """Dibuja la tabla del equipo por etapas (la ventana no se congela con 50 personas) y
+        no la vuelve a dibujar si ni los datos ni el mes cambiaron."""
+        firma = (self.servicio.periodo, self.conexion.total_changes)
+        if firma == getattr(self, "_firma_equipo", None):
+            return
+        self._firma_equipo = None
+        self._tok_equipo = getattr(self, "_tok_equipo", 0) + 1
+        self._avanzar_dibujo(self._gen_malla_equipo(firma), self._tok_equipo)
+
+    def _avanzar_dibujo(self, gen, tok: int) -> None:
+        if tok != self._tok_equipo:  # llegó un dibujo más nuevo: este se abandona
+            return
+        try:
+            next(gen)
+        except StopIteration:
+            return
+        self.root.after(1, lambda: self._avanzar_dibujo(gen, tok))
+
+    def _gen_malla_equipo(self, firma):
         self._dibujar_cuadrantes()
         interior = self.interior_equipo
         for w in interior.winfo_children():
@@ -1624,7 +1656,9 @@ class AplicacionTurnosGUI:
                 interior, text="Aún no hay personal registrado.", bg=BLANCO, fg=GRIS,
                 font=("Segoe UI", 11), padx=20, pady=20,
             ).grid(row=0, column=0)
+            self._firma_equipo = firma
             return
+        yield  # el marco ya está limpio; se sigue con el encabezado
 
         orden_rol = {rol: i for i, rol in enumerate(ROLES_PERSONAL)}
         orden_turno = {g: i for i, g in enumerate(GRUPOS_TURNO)}
@@ -1670,7 +1704,9 @@ class AplicacionTurnosGUI:
         presencia = {}
         fila = 3
         grupo_previo = "—"
-        for d in datos:
+        for n_fila, d in enumerate(datos):
+            if n_fila and n_fila % 6 == 0:
+                yield  # cada 6 personas se devuelve el control a la ventana
             persona, malla = d["persona"], d["malla"]
             grupo = grupo_de(d)
             if grupo != grupo_previo:
@@ -1737,91 +1773,79 @@ class AplicacionTurnosGUI:
                     )
             fila += 1
 
-        tk.Label(
-            interior, text="Personas de turno por día", bg=BLANCO, fg=MORADO,
-            font=("Segoe UI", 9, "bold"), anchor="w",
-        ).grid(row=fila, column=0, columnspan=4, rowspan=2, sticky="sw", pady=(12, 2))
-        encabezado_dias(fila)  # los días también se ven sobre estas filas
-        fila += 2
+        # Tres resúmenes de solo lectura: cada uno es UN canvas (con sus propios días arriba)
+        filas_pres = []
         for rol in ROLES_PERSONAL:
             for jornada, nombre in (("DIURNO", "día"), ("NOCTURNO", "noche")):
                 conteo = presencia.get((rol, jornada))
-                if not conteo:
-                    continue
-                tk.Label(
-                    interior, text=f"{etiqueta_rol(rol)} · {nombre}",
-                    bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
-                ).grid(row=fila, column=0, columnspan=4, sticky="w")
-                for k, v in enumerate(conteo):
-                    tk.Label(
-                        interior, text=str(v), width=3, font=("Segoe UI", 8, "bold"),
-                        bg=VERDE_CLARO if v else ROJO_CLARO, fg=VERDE_OSC if v else ROJO,
-                    ).grid(row=fila, column=base + k, padx=1, pady=1)
-                fila += 1
+                if conteo:
+                    filas_pres.append((f"{etiqueta_rol(rol)} · {nombre}", [(v, v > 0) for v in conteo]))
+        yield
+        fila = self._canvas_resumen(interior, fila, "Personas de turno por día", dias, filas_pres, base + n_dias)
 
         conteo_dia = self.servicio.personas_por_dia()
+        filas_min, avisos = [], []
         if any(conteo_dia):
-            tk.Label(
-                interior, text=f"Total en servicio (mín. {MIN_PERSONAS_POR_DIA})", bg=BLANCO, fg=MORADO,
-                anchor="w", font=("Segoe UI", 9, "bold"),
-            ).grid(row=fila, column=0, columnspan=4, sticky="w", pady=(4, 0))
-            for k, v in enumerate(conteo_dia):
-                ok = v >= MIN_PERSONAS_POR_DIA
-                tk.Label(
-                    interior, text=str(v), width=3, font=("Segoe UI", 8, "bold"),
-                    bg=VERDE_CLARO if ok else ROJO_CLARO, fg=VERDE_OSC if ok else ROJO,
-                ).grid(row=fila, column=base + k, padx=1, pady=(4, 1))
-            fila += 1
+            filas_min.append((f"Total en servicio (mín. {MIN_PERSONAS_POR_DIA})",
+                              [(v, v >= MIN_PERSONAS_POR_DIA) for v in conteo_dia]))
             bajo = self.servicio.dias_bajo_minimo()
             if bajo:
-                tk.Label(
-                    interior,
-                    text=f"⚠ {len(bajo)} día(s) con menos de {MIN_PERSONAS_POR_DIA} personas: "
-                         + ", ".join(f"{d.day} ({n})" for d, n in bajo[:15]) + ("…" if len(bajo) > 15 else ""),
-                    bg=ROJO_CLARO, fg=ROJO, anchor="w", font=("Segoe UI", 9), padx=6,
-                ).grid(row=fila, column=0, columnspan=base + n_dias, sticky="ew", pady=(2, 0))
-                fila += 1
-
+                avisos.append(
+                    f"⚠ {len(bajo)} día(s) con menos de {MIN_PERSONAS_POR_DIA} personas: "
+                    + ", ".join(f"{d.day} ({n})" for d, n in bajo[:15]) + ("…" if len(bajo) > 15 else "")
+                )
         for r in self.servicio.dias_bajo_minimo_modalidad():
-            tk.Label(
-                interior, text=f"{r['modalidad']}s · {'día' if r['jornada'] == 'DIURNO' else 'noche'} (mín. {r['minimo']})",
-                bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
-            ).grid(row=fila, column=0, columnspan=4, sticky="w")
-            for k, v in enumerate(r["conteo"]):
-                ok = v >= r["minimo"]
-                tk.Label(
-                    interior, text=str(v), width=3, font=("Segoe UI", 8, "bold"),
-                    bg=VERDE_CLARO if ok else ROJO_CLARO, fg=VERDE_OSC if ok else ROJO,
-                ).grid(row=fila, column=base + k, padx=1, pady=1)
-            fila += 1
+            jorn = "día" if r["jornada"] == "DIURNO" else "noche"
+            filas_min.append((f"{r['modalidad']}s · {jorn} (mín. {r['minimo']})",
+                              [(v, v >= r["minimo"]) for v in r["conteo"]]))
             if r["dias"]:
+                avisos.append(
+                    f"⚠ {r['modalidad']}s ({jorn}): {len(r['dias'])} día(s) con menos de {r['minimo']}: "
+                    + ", ".join(f"{d.day} ({n})" for d, n in r["dias"][:12]) + ("…" if len(r["dias"]) > 12 else "")
+                )
+        if filas_min:
+            fila = self._canvas_resumen(interior, fila, "Mínimos de operación por día", dias, filas_min, base + n_dias)
+            for texto in avisos:
                 tk.Label(
-                    interior,
-                    text=f"⚠ {r['modalidad']}s ({'día' if r['jornada'] == 'DIURNO' else 'noche'}): "
-                         f"{len(r['dias'])} día(s) con menos de {r['minimo']}: "
-                         + ", ".join(f"{d.day} ({n})" for d, n in r["dias"][:12]) + ("…" if len(r["dias"]) > 12 else ""),
-                    bg=ROJO_CLARO, fg=ROJO, anchor="w", font=("Segoe UI", 9), padx=6,
+                    interior, text=texto, bg=ROJO_CLARO, fg=ROJO, anchor="w", font=("Segoe UI", 9), padx=6,
                 ).grid(row=fila, column=0, columnspan=base + n_dias, sticky="ew", pady=(1, 0))
                 fila += 1
+        yield
+        filas_h = [
+            (g["nombre"], [(n, n == 24) for n in g["horas"]])
+            for g in self.servicio.cobertura_horaria()
+            if g["es_cargo"] or any(g["horas"])  # un Móvil sin ninguna malla se informa en las tarjetas
+        ]
+        self._canvas_resumen(interior, fila, "Horas cubiertas por día (24 = día completo)", dias, filas_h, base + n_dias)
+        self._firma_equipo = firma
 
-        tk.Label(
-            interior, text="Horas cubiertas por día (24 = día completo)", bg=BLANCO, fg=MORADO,
-            font=("Segoe UI", 9, "bold"), anchor="w",
-        ).grid(row=fila, column=0, columnspan=6, rowspan=2, sticky="sw", pady=(12, 2))
-        encabezado_dias(fila)
-        fila += 2
-        for g in self.servicio.cobertura_horaria():
-            if not g["es_cargo"] and not any(g["horas"]):
-                continue  # Móvil de un cuadrante sin ninguna malla: se informa en las tarjetas
-            tk.Label(
-                interior, text=g["nombre"], bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
-            ).grid(row=fila, column=0, columnspan=6, sticky="w")
-            for k, n in enumerate(g["horas"]):
-                tk.Label(
-                    interior, text=str(n), width=3, font=("Segoe UI", 8, "bold"),
-                    bg=VERDE_CLARO if n == 24 else ROJO_CLARO, fg=VERDE_OSC if n == 24 else ROJO,
-                ).grid(row=fila, column=base + k, padx=1, pady=1)
-            fila += 1
+    def _canvas_resumen(self, interior, fila: int, titulo: str, dias, filas, columnas: int) -> int:
+        """Tabla de solo lectura dibujada en un único canvas: días arriba y una fila por grupo.
+        filas: [(etiqueta, [(valor, cumple), ...])]. Devuelve la siguiente fila libre del marco."""
+        ancho_etq, ancho_cel, alto = 230, 25, 18
+        n = len(dias)
+        total = 20 + 2 * alto + len(filas) * alto + 4
+        c = tk.Canvas(interior, width=ancho_etq + n * ancho_cel + 4, height=total, bg=BLANCO, highlightthickness=0)
+        c.grid(row=fila, column=0, columnspan=columnas, sticky="w", pady=(12, 2))
+        c.create_text(2, 10, text=titulo, anchor="w", fill=MORADO, font=("Segoe UI", 9, "bold"))
+        for k, d in enumerate(dias):
+            x = ancho_etq + k * ancho_cel
+            fondo = "#E3D5F2" if d.weekday() >= 5 else MORADO_CLARO
+            c.create_rectangle(x + 1, 20, x + ancho_cel - 1, 20 + 2 * alto, fill=fondo, outline="")
+            c.create_text(x + ancho_cel / 2, 20 + alto / 2, text=cal.LETRAS_DIA[d.weekday()],
+                          fill=MORADO, font=("Segoe UI", 8, "bold"))
+            c.create_text(x + ancho_cel / 2, 20 + alto * 1.5, text=str(d.day),
+                          fill=MORADO_OSC, font=("Segoe UI", 8, "bold"))
+        for r, (etiqueta, valores) in enumerate(filas):
+            y = 20 + 2 * alto + r * alto
+            c.create_text(2, y + alto / 2, text=etiqueta, anchor="w", fill=TEXTO, font=("Segoe UI", 9))
+            for k, (v, ok) in enumerate(valores):
+                x = ancho_etq + k * ancho_cel
+                c.create_rectangle(x + 1, y + 1, x + ancho_cel - 1, y + alto - 1,
+                                   fill=VERDE_CLARO if ok else ROJO_CLARO, outline="")
+                c.create_text(x + ancho_cel / 2, y + alto / 2, text=str(v),
+                              fill=VERDE_OSC if ok else ROJO, font=("Segoe UI", 8, "bold"))
+        return fila + 1
 
     # ---------------------------------------------- diálogo: turnos A y B juntos
     def _abrir_turnos_ab(self) -> None:

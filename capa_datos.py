@@ -11,7 +11,25 @@ class RepositorioTurnos:
 
     def __init__(self, conexion: sqlite3.Connection):
         self.conexion = conexion
+        self._cache: dict = {}
+        self._cache_version = -1
+        try:  # escritura más rápida y lecturas que no se bloquean (en :memory: se ignora)
+            self.conexion.execute("PRAGMA journal_mode=WAL")
+            self.conexion.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
         self._crear_tablas()
+
+    def _cacheado(self, clave, calcular):
+        """Memoriza lecturas repetidas mientras la base no cambie (total_changes sube con
+        cualquier escritura de esta conexión, así que nunca se sirve un dato viejo)."""
+        version = self.conexion.total_changes
+        if version != self._cache_version:
+            self._cache.clear()
+            self._cache_version = version
+        if clave not in self._cache:
+            self._cache[clave] = calcular()
+        return self._cache[clave]
 
     # ------------------------------------------------------------------ esquema
     def _crear_tablas(self) -> None:
@@ -220,9 +238,11 @@ class RepositorioTurnos:
         )
 
     def listar_personal(self) -> list[dict]:
-        cursor = self.conexion.execute(self._select_personal() + " ORDER BY id")
-        columnas = [col[0] for col in cursor.description]
-        return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+        def leer():
+            cursor = self.conexion.execute(self._select_personal() + " ORDER BY id")
+            columnas = [col[0] for col in cursor.description]
+            return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+        return [dict(p) for p in self._cacheado("personal", leer)]
 
     def obtener_persona(self, personal_id: int) -> dict | None:
         cursor = self.conexion.execute(self._select_personal() + " WHERE id = ?", (personal_id,))
@@ -362,6 +382,10 @@ class RepositorioTurnos:
 
     def obtener_mallas_rango(self, desde: date, hasta: date) -> dict[int, list[dict]]:
         """{personal_id: filas} de todo el equipo entre dos fechas, en UNA sola consulta."""
+        crudo = self._cacheado(("mallas", desde, hasta), lambda: self._leer_mallas_rango(desde, hasta))
+        return {pid: [dict(f) for f in filas] for pid, filas in crudo.items()}
+
+    def _leer_mallas_rango(self, desde: date, hasta: date) -> dict[int, list[dict]]:
         cursor = self.conexion.execute(
             f"SELECT {self._COLUMNAS_MALLA} FROM asignaciones_turno a "
             "JOIN personal p ON p.id = a.personal_id WHERE a.fecha BETWEEN ? AND ? "
@@ -378,12 +402,14 @@ class RepositorioTurnos:
     # --------------------------------------------------------------- modalidades
     def obtener_modalidades(self) -> dict[int, list[str]]:
         """{personal_id: [modalidades]} de todos los que tienen alguna."""
-        res: dict[int, list[str]] = {}
-        for pid, modalidad in self.conexion.execute(
-            "SELECT personal_id, modalidad FROM modalidades_persona ORDER BY personal_id, modalidad"
-        ):
-            res.setdefault(pid, []).append(modalidad)
-        return res
+        def leer():
+            res: dict[int, list[str]] = {}
+            for pid, modalidad in self.conexion.execute(
+                "SELECT personal_id, modalidad FROM modalidades_persona ORDER BY personal_id, modalidad"
+            ):
+                res.setdefault(pid, []).append(modalidad)
+            return res
+        return {pid: list(m) for pid, m in self._cacheado("modalidades", leer).items()}
 
     def obtener_modalidades_persona(self, personal_id: int) -> list[str]:
         return self.obtener_modalidades().get(personal_id, [])
