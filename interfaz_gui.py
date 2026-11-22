@@ -6,12 +6,14 @@ asistente individual y planificador de equipo con cobertura 24/7.
 
 import sqlite3
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from capa_datos import RepositorioTurnos
 from capa_ley_opciones import ServicioTurnos
 from constantes_reglas import (
     CUADRANTES,
+    DESTINOS_SERVICIO,
+    FERIA,
     ESTADOS_CELDA,
     GRUPOS_TURNO,
     HORARIO_NOCTURNO,
@@ -355,10 +357,21 @@ class AplicacionTurnosGUI:
         self.lista_personal.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.lista_personal.bind("<<ListboxSelect>>", lambda e: self._on_seleccion_personal())
+        self.lista_personal.bind("<Double-Button-1>", lambda e: self._editar_nombre())
+        fila_acc = tk.Frame(c_lista, bg=BLANCO)
+        fila_acc.pack(fill=tk.X, pady=(8, 0))
+        fila_acc.columnconfigure(0, weight=1)
+        fila_acc.columnconfigure(1, weight=1)
         self._btn(
-            c_lista, text="Eliminar seleccionado", style="Rojo.TButton",
-            command=self._eliminar_personal,
-        ).pack(fill=tk.X, pady=(8, 0))
+            fila_acc, text="Editar nombre", style="Morado.TButton", command=self._editar_nombre,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._btn(
+            fila_acc, text="Eliminar", style="Rojo.TButton", command=self._eliminar_personal,
+        ).grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self._btn(
+            c_lista, text="⬆ Carga masiva (Excel / pegar lista)", style="Verde.TButton",
+            command=self._abrir_carga_masiva,
+        ).pack(fill=tk.X, pady=(6, 0))
 
         tarj_nuevo, c_nuevo = self._tarjeta(izq, "Agregar integrante", VERDE)
         tarj_nuevo.pack(fill=tk.X)
@@ -384,7 +397,7 @@ class AplicacionTurnosGUI:
         self.combo_jornada_nueva.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(0, 8))
         ttk.Label(c_nuevo, text="Cuadrante (opcional)").grid(row=6, column=0, columnspan=2, sticky="w")
         self.combo_cuad_nuevo = ttk.Combobox(
-            c_nuevo, values=(SIN_CUADRANTE, *CUADRANTES), state="readonly"
+            c_nuevo, values=(SIN_CUADRANTE, *DESTINOS_SERVICIO), state="readonly"
         )
         self.combo_cuad_nuevo.current(0)
         self.combo_cuad_nuevo.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -438,6 +451,10 @@ class AplicacionTurnosGUI:
             fg=MORADO, font=("Segoe UI", 13, "bold"), anchor="w",
         )
         self.lbl_nombre.pack(side=tk.LEFT)
+        self._btn(
+            fila_top, text="⬇ Descargar Excel", style="Morado.TButton",
+            command=self._descargar_excel_individual,
+        ).pack(side=tk.RIGHT)
 
         self.lbl_detalle = tk.Label(
             c_malla, text="", bg=VERDE_CLARO, fg=VERDE_OSC, anchor="w",
@@ -490,7 +507,7 @@ class AplicacionTurnosGUI:
             fila_cuad, text="Asignar", style="Verde.TButton", command=self._asignar_cuadrante_individual,
         ).pack(side=tk.RIGHT)
         self.combo_cuad_ind = ttk.Combobox(
-            fila_cuad, values=(SIN_CUADRANTE, *CUADRANTES), state="readonly", width=16
+            fila_cuad, values=(SIN_CUADRANTE, *DESTINOS_SERVICIO), state="readonly", width=16
         )
         self.combo_cuad_ind.current(0)
         self.combo_cuad_ind.pack(side=tk.RIGHT, padx=6)
@@ -606,6 +623,13 @@ class AplicacionTurnosGUI:
         self.cuadrante_actual = None
         self._pintar_mapa()
 
+    def _descargar_excel_individual(self) -> None:
+        personal_id, _etq = self._id_seleccionado()
+        if personal_id is None:
+            messagebox.showwarning("Atención", "Seleccione primero un integrante de la lista.")
+            return
+        self._descargar_excel([personal_id])
+
     def _asignar_cuadrante_individual(self) -> None:
         personal_id, _etq = self._id_seleccionado()
         if personal_id is None:
@@ -708,6 +732,140 @@ class AplicacionTurnosGUI:
             messagebox.showerror("Bloqueo Legal (Art. 38)", str(err))
 
     # ------------------------------------------------------------------ eliminar
+    def _editar_nombre(self) -> None:
+        personal_id, etiqueta = self._id_seleccionado()
+        if personal_id is None:
+            messagebox.showwarning("Atención", "Seleccione primero un integrante de la lista.")
+            return
+        actual = next((p["nombre"] for p in self.servicio.listar_personal() if p["id"] == personal_id), "")
+        nuevo = simpledialog.askstring(
+            "Editar nombre", "Nuevo nombre:", initialvalue=actual, parent=self.root
+        )
+        if nuevo is None:
+            return
+        try:
+            self.servicio.renombrar_integrante(personal_id, nuevo)
+        except ValueError as err:
+            messagebox.showerror("Error", str(err))
+            return
+        sel = self.lista_personal.curselection()
+        self._cargar_lista_personal()
+        if sel:  # vuelve a la misma fila
+            self.lista_personal.selection_clear(0, tk.END)
+            self.lista_personal.selection_set(sel[0])
+            self.lista_personal.see(sel[0])
+            self._on_seleccion_personal()
+        self._refrescar_vistas()
+
+    def _abrir_carga_masiva(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Carga masiva de personal")
+        dlg.configure(bg=FONDO)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        tk.Label(
+            dlg, text="Carga masiva de personal", bg=MORADO, fg=BLANCO,
+            font=("Segoe UI", 12, "bold"), padx=16, pady=10, anchor="w",
+        ).pack(fill=tk.X)
+        tk.Frame(dlg, bg=VERDE, height=3).pack(fill=tk.X)
+        cuerpo = tk.Frame(dlg, bg=BLANCO, padx=16, pady=12)
+        cuerpo.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+
+        tk.Label(
+            cuerpo, text="Opción 1 · Desde un archivo Excel (.xlsx) o CSV", bg=BLANCO, fg=MORADO,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(
+            cuerpo, text="Columnas: Nombre · Cargo · Turno · Jornada · Cuadrante · Modalidades. "
+                         "Descargue la plantilla, complétela y cárguela.",
+            bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), wraplength=520, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self._btn(cuerpo, text="⬇ Descargar plantilla Excel", style="Morado.TButton",
+                  command=lambda: descargar_plantilla()).grid(row=2, column=0, sticky="ew", padx=(0, 4))
+        self._btn(cuerpo, text="⬆ Cargar archivo…", style="Verde.TButton",
+                  command=lambda: cargar_archivo()).grid(row=2, column=1, sticky="ew", padx=(4, 0))
+
+        tk.Label(
+            cuerpo, text="Opción 2 · Pegar una lista (un nombre por línea, o con columnas separadas por ; o tab)",
+            bg=BLANCO, fg=MORADO, font=("Segoe UI", 10, "bold"), wraplength=520, justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(14, 4))
+        caja = tk.Text(cuerpo, width=70, height=10, font=("Consolas", 10), bd=1, relief="solid")
+        caja.grid(row=4, column=0, columnspan=2, sticky="ew")
+        tk.Label(
+            cuerpo, text="Lo que no indique en la lista se toma de estos valores:",
+            bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9),
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 2))
+        defecto = tk.Frame(cuerpo, bg=BLANCO)
+        defecto.grid(row=6, column=0, columnspan=2, sticky="w")
+        combos = {}
+        for k, (titulo, valores, ancho) in enumerate((
+            ("Cargo", ("Patrullero", "Radio operador", "Supervisor"), 15),
+            ("Turno", GRUPOS_TURNO, 5),
+            ("Jornada", ("Diurno", "Nocturno"), 10),
+        )):
+            tk.Label(defecto, text=titulo, bg=BLANCO, fg=TEXTO, font=("Segoe UI", 9)).grid(row=0, column=k, sticky="w", padx=(0 if k == 0 else 10, 0))
+            cb = ttk.Combobox(defecto, values=valores, state="readonly", width=ancho)
+            cb.current(0)
+            cb.grid(row=1, column=k, sticky="w", padx=(0 if k == 0 else 10, 0))
+            combos[titulo] = cb
+        self._btn(cuerpo, text="Cargar lista pegada", style="Verde.TButton",
+                  command=lambda: cargar_pegado()).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        cuerpo.columnconfigure(0, weight=1)
+        cuerpo.columnconfigure(1, weight=1)
+
+        def terminar(res):
+            self._cargar_lista_personal()
+            self._refrescar_vistas()
+            texto = f"Se cargaron {res['importados']} integrante(s)."
+            if res["omitidos"]:
+                texto += f"\nSe omitieron {len(res['omitidos'])} que ya existían con el mismo nombre."
+            texto += "\n\nSiguiente paso: «Repartir cuadrantes» y «Asignar turnos A y B…» en la pestaña del equipo."
+            messagebox.showinfo("Carga masiva", texto, parent=dlg)
+            dlg.destroy()
+
+        def importar(filas, defaults=None):
+            try:
+                res = self.servicio.importar_personal(filas, defaults)
+            except ValueError as err:
+                messagebox.showerror("Carga masiva", str(err), parent=dlg)
+                return
+            terminar(res)
+
+        def descargar_plantilla():
+            ruta = filedialog.asksaveasfilename(
+                title="Guardar plantilla", defaultextension=".xlsx", initialfile="plantilla_personal.xlsx",
+                filetypes=[("Libro de Excel", "*.xlsx")], parent=dlg,
+            )
+            if not ruta:
+                return
+            try:
+                self.servicio.plantilla_carga_excel(ruta)
+            except OSError as err:
+                messagebox.showerror("Error", str(err), parent=dlg)
+                return
+            messagebox.showinfo("Plantilla guardada", f"Plantilla guardada en:\n{ruta}", parent=dlg)
+
+        def cargar_archivo():
+            ruta = filedialog.askopenfilename(
+                title="Elegir archivo de personal", parent=dlg,
+                filetypes=[("Excel o CSV", "*.xlsx *.csv"), ("Todos", "*.*")],
+            )
+            if not ruta:
+                return
+            try:
+                filas = self.servicio.leer_archivo_personal(ruta)
+            except Exception as err:  # archivo dañado, abierto en Excel, formato inválido
+                messagebox.showerror("No se pudo leer el archivo", str(err), parent=dlg)
+                return
+            importar(filas)
+
+        def cargar_pegado():
+            filas = self.servicio.texto_a_filas(caja.get("1.0", tk.END))
+            importar(filas, {
+                "rol": combos["Cargo"].get(), "turno": combos["Turno"].get(),
+                "jornada": combos["Jornada"].get(),
+            })
+
     def _eliminar_personal(self) -> None:
         personal_id, etiqueta = self._id_seleccionado()
         if personal_id is None:
@@ -891,6 +1049,10 @@ class AplicacionTurnosGUI:
         self._btn(
             barra, text="Repartir cuadrantes", style="Verde.TButton", command=self._repartir_cuadrantes,
         ).pack(side=tk.RIGHT, padx=(0, 8))
+        self._btn(
+            barra, text="⬇ Descargar Excel", style="Morado.TButton",
+            command=lambda: self._descargar_excel(None),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
 
         self.marco_cuadrantes = tk.Frame(tab, bg=FONDO)
         self.marco_cuadrantes.pack(fill=tk.X, pady=(0, 8))
@@ -905,6 +1067,22 @@ class AplicacionTurnosGUI:
         marco.pack(fill=tk.BOTH, expand=True)
         self.interior_equipo = self._marco_scroll(marco)
 
+    def _descargar_excel(self, personal_ids) -> None:
+        """Guarda la malla (de todo el equipo o de una persona) en un archivo Excel."""
+        sugerido = "malla_equipo.xlsx" if personal_ids is None else "malla_individual.xlsx"
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar malla en Excel", defaultextension=".xlsx", initialfile=sugerido,
+            filetypes=[("Libro de Excel", "*.xlsx")],
+        )
+        if not ruta:
+            return
+        try:
+            n = self.servicio.exportar_excel(ruta, personal_ids)
+        except (ValueError, OSError) as err:
+            messagebox.showerror("No se pudo guardar", str(err))
+            return
+        messagebox.showinfo("Excel guardado", f"Se guardó la malla de {n} integrante(s) en:\n{ruta}")
+
     def _repartir_cuadrantes(self) -> None:
         pendientes = [p for p in self.servicio.listar_personal() if not p.get("cuadrante")]
         solo_sin = True
@@ -918,10 +1096,17 @@ class AplicacionTurnosGUI:
         n = self.servicio.repartir_cuadrantes_auto(solo_sin_cuadrante=solo_sin)
         self._refrescar_vistas()
         self._mostrar_malla_guardada()
+        faltan = self.servicio.resumen_cuadrantes()["faltan_movil"]
+        aviso = (
+            "\n\n⚠ Faltan móviles en: " + ", ".join(faltan)
+            + ".\nAsigne la modalidad Móvil a más patrulleros (hay 6 cuadrantes) y reparta de nuevo."
+            if faltan else "\n\n✔ Todos los cuadrantes tienen al menos un Móvil."
+        )
         messagebox.showinfo(
             "Cuadrantes repartidos",
-            f"Se asignó cuadrante a {n} integrante(s), de forma pareja por cargo.\n"
-            "Puede ajustar cualquiera arrastrando su nombre a otro cuadrante.",
+            f"Se actualizó el destino de {n} integrante(s). Las motos no llevan cuadrante y las "
+            "bicicletas se reparten entre cuadrantes y Feria.\n"
+            "Puede ajustar cualquiera arrastrando su nombre a otro cuadrante." + aviso,
         )
 
     ABREVIATURAS_MODALIDAD = {"Móvil": "Móvil", "Moto": "Moto", "Infantería": "Infant.", "Bicicleta": "Bici"}
@@ -932,10 +1117,10 @@ class AplicacionTurnosGUI:
             w.destroy()
         resumen = self.servicio.resumen_cuadrantes()
         tk.Label(
-            marco, text="Cuadrantes de cada persona · modalidades (una persona puede usar varias)  ·  arrastre un nombre a un cuadrante para cambiarlo",
+            marco, text="Cuadrantes y Feria · cada cuadrante necesita al menos un Móvil · las motos no llevan cuadrante · arrastre un nombre para cambiarlo",
             bg=FONDO, fg=MORADO, font=("Segoe UI", 10, "bold"), anchor="w",
-        ).grid(row=0, column=0, columnspan=len(CUADRANTES), sticky="w", pady=(0, 4))
-        for i, nombre in enumerate(CUADRANTES):
+        ).grid(row=0, column=0, columnspan=len(DESTINOS_SERVICIO), sticky="w", pady=(0, 4))
+        for i, nombre in enumerate(DESTINOS_SERVICIO):
             datos = resumen["cuadrantes"][nombre]
             tarjeta = tk.Frame(
                 marco, bg=BLANCO, highlightbackground="#DDD3E8", highlightthickness=2, padx=8, pady=6,
@@ -963,14 +1148,22 @@ class AplicacionTurnosGUI:
             chips.columnconfigure(0, weight=1)
             chips.columnconfigure(1, weight=1)
             extra = []
+            if nombre in resumen["faltan_movil"]:
+                extra.append("⚠ SIN MÓVIL")
+            if nombre == FERIA:
+                extra.append("(solo bicicletas)")
             if datos["patrulleros_sin_modalidad"]:
                 extra.append(f"Patrull. sin modalidad {datos['patrulleros_sin_modalidad']}")
             for rol, n in datos["por_rol"].items():
                 extra.append(f"{rol.replace('_', ' ').capitalize()} {n}")
             tk.Label(
-                tarjeta, text="\n".join(extra) if extra else " ", bg=BLANCO, fg=GRIS,
-                font=("Segoe UI", 8), anchor="w", justify="left",
+                tarjeta, text="\n".join(extra) if extra else " ", bg=BLANCO,
+                fg=ROJO if nombre in resumen["faltan_movil"] else GRIS,
+                font=("Segoe UI", 8, "bold" if nombre in resumen["faltan_movil"] else "normal"),
+                anchor="w", justify="left",
             ).pack(fill=tk.X, pady=(3, 0))
+            if nombre in resumen["faltan_movil"]:
+                tarjeta.configure(highlightbackground=ROJO)
             # toda la tarjeta acepta que se suelte un nombre encima
             destino = {"tipo": "cuadrante", "cuadrante": nombre, "marco": tarjeta}
             tarjeta._destino = destino
@@ -978,11 +1171,12 @@ class AplicacionTurnosGUI:
                 hijo._destino = destino
         sin = resumen["sin_cuadrante"]
         marco_sin = tk.Frame(marco, bg=BLANCO, highlightbackground="#DDD3E8", highlightthickness=2, padx=8, pady=4)
-        marco_sin.grid(row=2, column=0, columnspan=len(CUADRANTES), sticky="ew", padx=3, pady=(4, 0))
+        marco_sin.grid(row=2, column=0, columnspan=len(DESTINOS_SERVICIO), sticky="ew", padx=3, pady=(4, 0))
         tk.Label(
             marco_sin,
             text=f"Sin cuadrante ({len(sin)}): " + (", ".join(sin[:8]) + ("…" if len(sin) > 8 else "") if sin else "ninguno")
-            + "   ·   suelte aquí un nombre para quitarle el cuadrante",
+            + f"   ·   Motos, sin cuadrante por norma ({len(resumen['motos'])}): "
+            + (", ".join(resumen["motos"][:6]) + ("…" if len(resumen["motos"]) > 6 else "") if resumen["motos"] else "ninguna"),
             bg=BLANCO, fg=GRIS, font=("Segoe UI", 8), anchor="w",
         ).pack(fill=tk.X)
         destino = {"tipo": "cuadrante", "cuadrante": None, "marco": marco_sin}
@@ -1127,6 +1321,24 @@ class AplicacionTurnosGUI:
                         bg=VERDE_CLARO if v else ROJO_CLARO, fg=VERDE_OSC if v else ROJO,
                     ).grid(row=fila, column=base + k, padx=1, pady=1)
                 fila += 1
+
+        tk.Label(
+            interior, text="Horas cubiertas por día (24 = día completo)", bg=BLANCO, fg=MORADO,
+            font=("Segoe UI", 9, "bold"), anchor="w",
+        ).grid(row=fila, column=0, columnspan=6, sticky="w", pady=(12, 2))
+        fila += 1
+        for g in self.servicio.cobertura_horaria():
+            if not g["es_cargo"] and not any(g["horas"]):
+                continue  # Móvil de un cuadrante sin ninguna malla: se informa en las tarjetas
+            tk.Label(
+                interior, text=g["nombre"], bg=BLANCO, fg=TEXTO, anchor="w", font=("Segoe UI", 9),
+            ).grid(row=fila, column=0, columnspan=6, sticky="w")
+            for k, n in enumerate(g["horas"]):
+                tk.Label(
+                    interior, text=str(n), width=3, font=("Segoe UI", 8, "bold"),
+                    bg=VERDE_CLARO if n == 24 else ROJO_CLARO, fg=VERDE_OSC if n == 24 else ROJO,
+                ).grid(row=fila, column=base + k, padx=1, pady=1)
+            fila += 1
 
     # ---------------------------------------------- diálogo: turnos A y B juntos
     def _abrir_turnos_ab(self) -> None:
@@ -1283,7 +1495,14 @@ class AplicacionTurnosGUI:
             dlg.destroy()
             self._mostrar_malla_guardada()
             self._refrescar_vistas()
-            messagebox.showinfo("Turnos asignados", f"Se asignó la malla mensual a {n} integrantes.")
+            avisos = self.servicio.avisos_horarios()
+            messagebox.showinfo(
+                "Turnos asignados",
+                f"Se asignó la malla mensual a {n} integrantes."
+                + ("\n\n⚠ Horario sin cubrir las 24 h:\n" + "\n".join(avisos)
+                   + "\nAgregue más personal de día o marque los 3 horarios." if avisos
+                   else "\n\n✔ Las 24 horas del día quedan cubiertas."),
+            )
 
         botones = tk.Frame(cuerpo, bg=BLANCO)
         botones.grid(row=7, column=0, sticky="ew", pady=(10, 0))
@@ -1348,7 +1567,7 @@ class AplicacionTurnosGUI:
             command=self._asignar_cuadrante_seleccion,
         ).pack(side=tk.RIGHT)
         self.combo_cuad_mod = ttk.Combobox(
-            extra, values=(SIN_CUADRANTE, *CUADRANTES), state="readonly", width=16
+            extra, values=(SIN_CUADRANTE, *DESTINOS_SERVICIO), state="readonly", width=16
         )
         self.combo_cuad_mod.current(1)
         self.combo_cuad_mod.pack(side=tk.RIGHT, padx=6)
@@ -1498,7 +1717,7 @@ class AplicacionTurnosGUI:
 
         # el cuadrante y las modalidades son propios de la persona (no dependen de la malla)
         combo_cuadrante = ttk.Combobox(
-            cuerpo, values=(SIN_CUADRANTE, *CUADRANTES), state="readonly", width=26
+            cuerpo, values=(SIN_CUADRANTE, *DESTINOS_SERVICIO), state="readonly", width=26
         )
         combo_cuadrante.set(perfil.get("cuadrante") or SIN_CUADRANTE)
         fila(4, "Cuadrante de la persona", combo_cuadrante)
@@ -1567,13 +1786,13 @@ class AplicacionTurnosGUI:
                 return
             idx = var_opcion.get()
             try:
-                self.servicio.asignar_cuadrante(
-                    [personal_id], None if combo_cuadrante.current() == 0 else combo_cuadrante.get()
-                )
                 if vars_mod:
                     self.servicio.asignar_modalidades(
                         [personal_id], [m for m, v in vars_mod.items() if v.get()]
                     )
+                self.servicio.asignar_cuadrante(
+                    [personal_id], None if combo_cuadrante.current() == 0 else combo_cuadrante.get()
+                )
                 # reemplaza la malla previa del integrante (transacción única)
                 self.servicio.asignar_opcion_a_personal(personal_id, self.opciones_actuales[idx])
                 self.servicio.actualizar_perfil_turno(
@@ -1675,9 +1894,15 @@ class AplicacionTurnosGUI:
         )
         combo_mod.current(0)
         fila_p(1, "Modalidades (solo patrulleros)", combo_mod)
-        combo_hor = ttk.Combobox(marco_p, values=HORARIOS_DIURNOS, state="readonly", width=26)
-        combo_hor.current(0)
-        fila_p(2, "Horario diurno", combo_hor)
+        marco_hor = tk.Frame(marco_p, bg=BLANCO)
+        vars_hor = {}
+        for h in HORARIOS_DIURNOS:
+            vars_hor[h] = tk.BooleanVar(value=True)
+            tk.Checkbutton(
+                marco_hor, text=h, variable=vars_hor[h], bg=BLANCO, activebackground=BLANCO,
+                selectcolor=BLANCO, font=("Segoe UI", 9), anchor="w",
+            ).pack(anchor="w")
+        fila_p(2, "Horarios diurnos (se reparten\npara cubrir las 24 h)", marco_hor)
         ttk.Label(marco_p, text=f"Horario nocturno: {HORARIO_NOCTURNO}", foreground=GRIS).grid(
             row=6, column=0, sticky="w"
         )
@@ -1875,7 +2100,9 @@ class AplicacionTurnosGUI:
             if elegida.startswith("Agregar "):
                 modalidades = {pid: [elegida[len("Agregar "):]] for pid in patrulleros}
             try:
-                self.servicio.asignar_plan_equipo(op, combo_hor.get(), modalidades)
+                avisos = self.servicio.asignar_plan_equipo(
+                    op, [h for h, v in vars_hor.items() if v.get()], modalidades
+                )
                 if elegida.startswith("Repartir"):
                     self.servicio.repartir_modalidades_auto(patrulleros)
             except ValueError as err:
@@ -1885,7 +2112,11 @@ class AplicacionTurnosGUI:
             self._mostrar_malla_guardada()
             self._refrescar_vistas()
             messagebox.showinfo(
-                "Plan asignado", f"Se asignó la malla mensual a {len(op['personas'])} integrantes."
+                "Plan asignado",
+                f"Se asignó la malla mensual a {len(op['personas'])} integrantes."
+                + ("\n\n⚠ Horario sin cubrir las 24 h:\n" + "\n".join(avisos)
+                   + "\nSuba la dotación de día en el planificador o marque los 3 horarios." if avisos
+                   else "\n\n✔ Las 24 horas del día quedan cubiertas."),
             )
 
         self._btn(

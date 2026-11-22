@@ -108,6 +108,36 @@ class RepositorioTurnos:
                 )
             return cursor.lastrowid
 
+    def actualizar_nombre(self, personal_id: int, nombre: str) -> bool:
+        with self.conexion:
+            cursor = self.conexion.execute(
+                "UPDATE personal SET nombre = ? WHERE id = ?", (nombre, personal_id)
+            )
+            return cursor.rowcount > 0
+
+    def registrar_varios(self, filas: list[tuple]) -> list[int]:
+        """Carga masiva en UNA transacción: si algo falla no se guarda a nadie.
+        filas: (nombre, rol, grupo_turno, jornada, cuadrante|None, [modalidades])."""
+        ids = []
+        with self.conexion:
+            for nombre, rol, grupo, jornada, cuadrante, modalidades in filas:
+                if self._tiene_apellido:
+                    cur = self.conexion.execute(
+                        "INSERT INTO personal (nombre, apellido, rol, grupo_turno, jornada, cuadrante) "
+                        "VALUES (?, '', ?, ?, ?, ?)", (nombre, rol, grupo, jornada, cuadrante),
+                    )
+                else:
+                    cur = self.conexion.execute(
+                        "INSERT INTO personal (nombre, rol, grupo_turno, jornada, cuadrante) "
+                        "VALUES (?, ?, ?, ?, ?)", (nombre, rol, grupo, jornada, cuadrante),
+                    )
+                ids.append(cur.lastrowid)
+                self.conexion.executemany(
+                    "INSERT OR IGNORE INTO modalidades_persona (personal_id, modalidad) VALUES (?, ?)",
+                    [(cur.lastrowid, m) for m in modalidades],
+                )
+        return ids
+
     def eliminar_personal(self, personal_id: int) -> None:
         """Elimina a la persona junto con su malla y sus modalidades (una sola transacción)."""
         with self.conexion:

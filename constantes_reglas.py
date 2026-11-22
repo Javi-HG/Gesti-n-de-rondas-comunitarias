@@ -9,6 +9,13 @@ CUADRANTES = (
     "Cuadrante 6",
 )
 
+# La feria es un destino de servicio alternativo al cuadrante, solo para bicicletas.
+FERIA = "Feria"
+DESTINOS_SERVICIO = CUADRANTES + (FERIA,)
+
+# Cada cuadrante debe tener al menos esta cantidad de patrulleros con modalidad Móvil.
+MIN_MOVILES_POR_CUADRANTE = 1
+
 # Para sumar cargos nuevos basta agregarlos aquí; el planificador de equipo
 # calcula la cobertura por cada rol registrado.
 ROLES_PERSONAL = ("PATRULLERO", "RADIO_OPERADOR", "SUPERVISOR")
