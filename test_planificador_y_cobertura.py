@@ -8,7 +8,7 @@ from cobertura_horaria import (
 )
 from constantes_reglas import HORARIO_NOCTURNO, HORARIOS_DIURNOS
 from planificador_cobertura import minimo_personas, opciones_turnos_ab
-from tests.conftest import ANIO, MES
+from conftest import ANIO, MES
 
 PERSONAS = [
     (1, "a", "PATRULLERO", "A", "DIURNO"), (2, "b", "PATRULLERO", "B", "DIURNO"),

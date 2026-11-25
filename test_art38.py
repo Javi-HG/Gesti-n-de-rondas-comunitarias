@@ -8,7 +8,7 @@ from planificador_cobertura import (
     DIURNO, ESTADO_LIBRE, ESTADO_TURNO, NOCTURNO, opciones_turnos_ab, validar_art38,
 )
 from capa_ley_opciones import ServicioTurnos
-from tests.conftest import filas_con_estado
+from conftest import filas_con_estado
 
 DOMINGO = 6
 SABADO = 5

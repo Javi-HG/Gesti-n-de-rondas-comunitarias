@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from constantes_reglas import ESTADOS_AUSENCIA, ESTADOS_LIBRES, HORARIOS_DIURNOS
-from tests.conftest import ANIO, MES, filas_con_estado
+from conftest import ANIO, MES, filas_con_estado
 
 DESDE, HASTA = date(ANIO, MES, 10), date(ANIO, MES, 16)  # 7 días, del martes 10 al lunes 16
 

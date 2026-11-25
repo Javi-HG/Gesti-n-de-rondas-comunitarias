@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Base de datos local: contiene datos personales del personal, no se versiona
+*.db
+*.db-shm
+*.db-wal
+
+# Exportaciones generadas por la aplicación
+*.xlsx
+
+# Editor / sistema
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
